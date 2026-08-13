@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.coverage
+.conda-env/
+*.egg-info/
+*.orig
+outputs/*
+!outputs/.gitkeep
+logs/
+exports/
+.torch_extensions
+.cuda

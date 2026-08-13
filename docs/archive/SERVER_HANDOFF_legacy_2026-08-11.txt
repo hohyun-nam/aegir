@@ -1,0 +1,902 @@
+[보관 문서 - 실행 금지] AEGIR 연구실 서버 이전 및 학습 메모
+작성일: 2026-08-11
+
+============================================================
+0. 경로 전제
+============================================================
+
+이 문서는 연구실 서버의 작업 루트를 다음과 같이 가정한다.
+
+  WORKSPACE=/home/megapose/hohyun_ws
+  AEGIR=$WORKSPACE/AEGIR
+  AEGIR_OLD=$WORKSPACE/AEGIR_old
+
+현재 로컬 컴퓨터에서는 다음 경로가 같은 역할을 한다.
+
+  /home/hohyun/workspace/AEGIR
+  /home/hohyun/workspace/AEGIR_old
+
+AEGIR_old는 예전 per-view G-buffer 구현이면서 전처리 유틸리티 보관소다.
+새 학습은 반드시 $WORKSPACE/AEGIR의 aegir 패키지로 실행한다.
+AEGIR_old 아래의 DN-Splatter .ckpt는 옛 AEGIR 학습 체크포인트가 아니라
+AEGIR의 입력 geometry 체크포인트이므로 사용해도 된다.
+
+
+============================================================
+1. 서버에 옮겨야 하는 것
+============================================================
+
+[필수]
+
+1) 현재 AEGIR 코드
+   로컬: /home/hohyun/workspace/AEGIR
+   서버: /home/megapose/hohyun_ws/AEGIR
+
+2) FIPT-Real 원본 중 사용할 scene
+   conference: 191 views, 약 958 MB
+   classroom:  278 views, 약 1.2 GB
+
+   로컬:
+     /home/hohyun/workspace/data/conference
+     /home/hohyun/workspace/data/classroom
+
+   서버 권장 위치:
+     $WORKSPACE/datasets/raw/fipt_real/conference
+     $WORKSPACE/datasets/raw/fipt_real/classroom
+
+3) CUDA extension source
+   $WORKSPACE/external/2d-gaussian-splatting
+   $WORKSPACE/external/IRGS
+
+[전처리를 새로 할 때 필요]
+
+4) AEGIR_old의 scripts, patches, docs
+   특히 다음 파일들이 필요하다.
+
+   scripts/run_dnsplatter_init.py
+   scripts/prepare_diffusionrenderer_input.py
+   scripts/run_diffusionrenderer_priors.py
+   scripts/export_dnsplatter_gbuffers.py
+   scripts/import_diffusionrenderer_priors_to_dir.py
+   scripts/create_dnsplatter_env.sh
+   scripts/create_diffusionrenderer_env.sh
+   patches/diffusionrenderer_cpu_offload.patch
+
+5) external repos
+   $WORKSPACE/external/dn-splatter
+   $WORKSPACE/external/diffusion-renderer
+
+빌드 산출물과 캐시는 옮기지 말고 서버 GPU에 맞춰 다시 빌드한다.
+제외 권장: __pycache__, .pytest_cache, .torch_extensions, build*, dist
+
+SSH host 별칭이 labserver라고 가정한 전송 예시는 다음과 같다.
+실제 host 별칭이 다르면 labserver만 바꾼다.
+
+  rsync -av --info=progress2 \
+    --exclude '__pycache__' --exclude '.pytest_cache' \
+    --exclude '.torch_extensions' --exclude 'outputs' \
+    /home/hohyun/workspace/AEGIR/ \
+    labserver:/home/megapose/hohyun_ws/AEGIR/
+
+  rsync -av --info=progress2 \
+    /home/hohyun/workspace/data/conference/ \
+    labserver:/home/megapose/hohyun_ws/datasets/raw/fipt_real/conference/
+
+AEGIR_old가 서버에 없다면 전체를 다시 보내는 대신 위의 전처리 파일과
+필요한 DN 체크포인트만 먼저 보내도 된다.
+
+
+============================================================
+2. 서버 폴더 생성
+============================================================
+
+AEGIR 코드를 서버에 보낸 뒤 실행한다.
+
+  cd /home/megapose/hohyun_ws/AEGIR
+  bash scripts/prepare_server_workspace.sh /home/megapose/hohyun_ws
+
+생성되는 주요 폴더:
+
+  AEGIR/outputs
+  AEGIR/.torch_extensions
+  datasets/raw/fipt_real
+  datasets/aegir_nerfstudio
+  datasets/diffusionrenderer_input
+  datasets/diffusionrenderer_priors
+  external
+  external_runs/dn_splatter
+
+
+============================================================
+3. 이번에 새 AEGIR에서 수정한 내용
+============================================================
+
+1) per-view G-buffer 학습을 shared Gaussian 학습으로 변경
+
+   예전 AEGIR_old는 카메라마다 독립적인 [H,W] material map을 학습했다.
+   새 AEGIR은 하나의 Gaussian scene에 geometry와 per-Gaussian
+   albedo/roughness/metallic을 저장하고 모든 카메라가 이를 공유한다.
+
+2) DN-Splatter 3D Gaussian을 실제 planar 2D Gaussian으로 고정
+
+   import 시 가장 얇은 축을 local z normal 축으로 옮기고 그 scale은 버린다.
+   학습 파라미터에는 tangent scale 두 개만 있으므로 학습 중 다시 부피가 있는
+   3D Gaussian으로 부풀 수 없다.
+
+3) primary G-buffer rasterizer 교체
+
+   일반 gsplat 3D rasterization 대신 공식 2DGS
+   diff-surfel-rasterization을 사용한다. expected depth, alpha, normal과
+   shared material을 매 view에서 differentiable하게 rasterize한다.
+
+4) DiffusionRenderer depth/normal prior 제거
+
+   data loader와 loss는 prior_albedo, prior_roughness, prior_metallic만 읽는다.
+   DiffusionRenderer의 depth/normal 출력은 학습 supervision에 사용하지 않는다.
+   화면 확인용으로 rasterized depth/normal을 출력하는 것은 prior 사용과 다르다.
+
+5) emitter split 동작 수정
+
+   emitter를 split할 때 parent를 남기지 않고 두 child로 교체한다.
+   child intensity는 각각 절반으로 하여 총 에너지를 보존한다.
+
+6) 회전된 emitter ray intersection 축 계산 수정
+
+   emitter quaternion이 identity가 아닐 때 ray를 local frame으로 변환하는
+   행렬 곱 방향을 수정했다. rotated anisotropic emitter의 hit 거리와 MIS,
+   visibility 계산이 올바른 축을 사용한다.
+
+7) direct visibility를 IRGS OptiX tracer로 교체
+
+   point-center 근사 shadow 대신 공식 IRGS surfel_tracer를 사용한다.
+   shared 2D Gaussian으로 OptiX BVH를 만들고 BRDF/light direct ray의
+   differentiable opacity/depth visibility를 계산한다.
+
+   남아 있는 근사:
+   secondary indirect bounce 4 rays는 아직 고정 DN SH/DC proxy point를 쓴다.
+   direct shadow는 IRGS지만 secondary emitter tracing까지 논문과 완전히 같은
+   상태는 아니다.
+
+8) proxy_rgb 제거
+
+   별도의 trainable proxy_rgb는 없다. 단, 위의 secondary indirect bounce를
+   위해 고정 sh_proxy_color buffer는 남아 있다. 둘은 같은 것이 아니다.
+
+9) ray budget 수정
+
+   rays_per_step은 더 이상 사용되지 않는 옵션이 아니다. 기본 1024이며
+   128x128 raster에서 정확히 32x32 patch를 선택한다.
+
+   primary points: 1024
+   BRDF samples per point: 128
+   light samples per point: 128 (emitter 사이에 균등 배분)
+   direct transport rays: 1024 * (128 + 128) = 262,144 / iteration
+   indirect approximation: 1024 * 4 = 4,096 / iteration
+
+10) HDR emitter initialization 유지
+
+   transforms.json frame에 radiance_hdr_file_path가 있으면 HDR radiance를
+   emitter bright-region initialization에 사용한다. 없으면 LDR 기반 fallback이
+   되므로 FIPT-Real 변환 시 EXR을 float .npy로 보존해야 한다.
+
+11) 테스트
+
+   현재 dnsplatter 환경에서 dataset converter 회귀 테스트를 포함해
+   최종 21 tests passed를 확인했다.
+   504,015 Gaussians와 262,144 direct rays의 forward/backward도 성공했다.
+   transport 부분의 추가 peak VRAM은 약 425 MB였으며 full iteration 측정은 아니다.
+
+
+============================================================
+4. 서버 환경 및 CUDA extension 설치
+============================================================
+
+서버에 기존 dnsplatter conda 환경이 있다면 우선 그것을 재사용한다.
+
+  source /home/megapose/miniconda3/etc/profile.d/conda.sh
+  conda activate dnsplatter
+  cd /home/megapose/hohyun_ws/AEGIR
+  python -m pip install -e .
+
+필요 source checkout:
+
+  cd /home/megapose/hohyun_ws
+  git clone --recursive https://github.com/hbb1/2d-gaussian-splatting.git external/2d-gaussian-splatting
+
+  mkdir -p external
+  git clone --recursive https://github.com/fudan-zvg/IRGS.git external/IRGS
+  git -C external/IRGS checkout 1461869c0da84f26aebd8bb6d1caaa8a7bd91326
+  git -C external/IRGS submodule update --init --recursive
+
+현재 로컬 2DGS checkout은 commit
+335ad612f2e783a4e57b9cbc4d1e167bd599fc98이다.
+2DGS 전체 repo에는 로컬 수정이 있으므로 commit을 checkout하는 것보다
+필수 submodule인 diff-surfel-rasterization source가 있는지 확인하는 것이 중요하다.
+
+GPU compute capability와 nvcc 확인:
+
+  python -c "import torch; print(torch.__version__, torch.version.cuda); print(torch.cuda.get_device_name(0)); print(torch.cuda.get_device_capability(0))"
+  which nvcc || true
+
+extension은 반드시 서버 GPU에서 다시 빌드한다.
+
+  cd /home/megapose/hohyun_ws/AEGIR
+  bash scripts/install_2dgs_rasterizer.sh
+  bash scripts/install_irgs_tracer.sh
+
+설치 확인:
+
+  python -c "from diff_surfel_rasterization import GaussianRasterizer; from surfel_tracer import GaussianTracer; print('extensions OK')"
+  python -m pytest -q
+
+주의: 현재 실행 스크립트는 conda env 안의 nvidia/cu13을 찾도록 작성돼 있다.
+서버 환경이 CUDA 12.x라면 installer의 CUDA_HOME 자동 탐지는 확인해야 하며,
+run_*.sh의 CUDA_ROOT 하드코딩도 서버 환경에 맞춰 바꿔야 한다.
+
+
+============================================================
+5. FIPT-Real converter 구현 및 검증 결과
+============================================================
+
+현재 원본은 온전하다.
+
+  Image/*.exr, Image/*.png
+  Rt.txt, K_list.txt
+  MiDepth/*.npy
+  MiNormalGlobal/*.png
+  ImMask/*.png
+  segmentation/*.exr
+
+중요: AEGIR_old/scripts/export_fipt_nerfstudio.py는 FIPT synthetic 전용이다.
+FIPT-Real용 converter는 현재 AEGIR에 별도로 구현했다.
+
+  scripts/export_fipt_real_nerfstudio.py
+
+현재 생성 및 검증된 출력:
+
+  $WORKSPACE/datasets/aegir_nerfstudio/fipt_real_conference/
+    191 frames, 540x360
+    transforms.json
+    images/frame_XXXX.png
+    radiance_hdr/frame_XXXX.npy
+    depths/frame_XXXX.npy
+    normals_world/frame_XXXX.png
+    masks/frame_XXXX.png
+
+  $WORKSPACE/datasets/aegir_nerfstudio/fipt_real_classroom/
+    278 frames, 540x360
+    transforms.json
+    images/frame_XXXX.png
+    radiance_hdr/frame_XXXX.npy
+    depths/frame_XXXX.npy
+    normals_world/frame_XXXX.png
+    masks/frame_XXXX.png
+
+Rt.txt는 OpenCV c2w이며 rotation의 Y/Z 축을 뒤집어 Nerfstudio OpenGL c2w로
+저장한다. 반올림된 Rt rotation은 SVD로 직교화한다. MiDepth는 ray distance가
+아니라 meter 단위 camera-z depth다. transforms.json에는 다음을 명시했다.
+
+  aegir_source_camera_convention = opencv_c2w
+  aegir_camera_convention = opengl_c2w
+  aegir_depth_convention = opencv
+  aegir_depth_mode = z
+  depth_unit_scale_factor = 1.0
+  normal_space = world
+
+깊이로 계산한 normal과 원본 MiNormalGlobal의 median dot은 conference
+0.999965, classroom 0.999975다. AEGIR loader 및 Nerfstudio 공식 dataparser로
+모든 image/mask/depth/camera 수를 확인했다. EXR은 clipping 없이 RGB float32
+.npy로 보존했다. world normal은 DN-Splatter의 camera-space normal 입력으로
+오인하지 않도록 normal_world_file_path라는 별도 필드에 둔다.
+
+
+============================================================
+6. FIPT-Real 전체 실행 순서
+============================================================
+
+아래 변수는 conference 기준이다.
+
+  export WORKSPACE=/home/megapose/hohyun_ws
+  export ROOT=$WORKSPACE/AEGIR
+  export OLD=$WORKSPACE/AEGIR_old
+  export RAW=$WORKSPACE/datasets/raw/fipt_real/conference
+  export DATA=$WORKSPACE/datasets/aegir_nerfstudio/fipt_real_conference
+  export DN_RUN=$WORKSPACE/external_runs/dn_splatter/fipt_real_conference
+  export DR_INPUT=$WORKSPACE/datasets/diffusionrenderer_input/fipt_real_conference
+  export DR_PRIORS=$WORKSPACE/datasets/diffusionrenderer_priors/fipt_real_conference
+  export GBUFFER=$OLD/outputs/dnsplatter_fipt_real_conference_gbuffers_128
+  export PRIORS=$OLD/outputs/dnsplatter_fipt_real_conference_gbuffers_128_diffprior
+
+[A] FIPT-Real -> Nerfstudio 변환
+
+실행 명령:
+
+  conda activate dnsplatter
+  cd "$ROOT"
+  python scripts/export_fipt_real_nerfstudio.py \
+    --scene-dir "$RAW" \
+    --output-dir "$DATA"
+
+기존 출력은 기본적으로 덮어쓰지 않는다. 다시 만들 때만 검증 후 명시적으로
+--overwrite를 붙인다.
+
+DN-Splatter에서 이 depth를 사용할 때는 Nerfstudio 기본값 0.001을 쓰지 말고
+반드시 dataparser 옵션을 다음처럼 지정한다.
+
+  normal-nerfstudio \
+    --data "$DATA" \
+    --depth-unit-scale-factor 1.0 \
+    --load-normals False \
+    --load-3D-points False \
+    --load-pcd-normals False
+
+MiNormalGlobal은 world-space이므로 DN-Splatter가 기대하는 camera-space
+normals_from_pretrain 입력으로 직접 사용하면 안 된다. 위 옵션은 point cloud가
+아직 없는 현재 변환 출력에서도 DN dataparser가 안전하게 시작되도록 한다.
+
+[B] DN-Splatter 10k geometry 학습
+
+  conda activate dnsplatter
+  cd "$OLD"
+  python scripts/run_dnsplatter_init.py \
+    --data-dir "$DATA" \
+    --output-dir "$DN_RUN" \
+    --experiment-name fipt_real_conference \
+    --steps 10000 \
+    --stable
+
+생성된 checkpoint 선택:
+
+  export DN_CKPT=$(find "$DN_RUN" -path '*/nerfstudio_models/step-000009999.ckpt' | sort | tail -1)
+  test -s "$DN_CKPT" && echo "$DN_CKPT"
+
+[C] DiffusionRenderer material prior 생성
+
+AEGIR은 basecolor/albedo, roughness, metallic만 사용한다. normal/depth pass는
+요청할 필요가 없다.
+
+먼저 24-frame chunk 단위로 input을 만든다. conference는 191장이므로
+start-frame 0, 24, 48, 72, 96, 120, 144, 168을 사용한다.
+
+예: 첫 chunk
+
+  conda activate dnsplatter
+  cd "$OLD"
+  python scripts/prepare_diffusionrenderer_input.py \
+    --nerfstudio-dir "$DATA" \
+    --output-dir "$DR_INPUT/chunk_0" \
+    --video-name conference_chunk_0 \
+    --start-frame 0 \
+    --max-frames 24
+
+  conda activate diffusion_renderer
+  cd "$OLD"
+  python scripts/run_diffusionrenderer_priors.py \
+    --repo-dir "$WORKSPACE/external/diffusion-renderer" \
+    --input-dir "$DR_INPUT/chunk_0" \
+    --output-dir "$DR_PRIORS/chunk_0" \
+    --frames 24 \
+    --steps 20 \
+    --resolution "[256,256]" \
+    --decode-chunk-size 4 \
+    --model-passes basecolor roughness metallic
+
+VRAM이 부족하면 다음으로 바꾼다.
+
+  --resolution "[192,192]" --decode-chunk-size 1 --cpu-offload
+
+마지막 chunk는 23장이므로 --frames 23을 사용한다.
+
+[D] material prior .pt directory 생성
+
+새 AEGIR loader가 prior_dir에서 frame_XXXX.pt를 읽으므로 먼저 DN view sample을
+내보낸 뒤 DiffusionRenderer 결과를 붙인다. 이 .pt 안의 depth/normal이 존재해도
+새 AEGIR data loader는 prior로 읽지 않는다.
+
+  conda activate dnsplatter
+  cd "$OLD"
+  python scripts/export_dnsplatter_gbuffers.py \
+    --gaussians "$DN_CKPT" \
+    --nerfstudio-dir "$DATA" \
+    --output-dir "$GBUFFER" \
+    --image-size 128 \
+    --max-frames 191 \
+    --device cuda
+
+  python scripts/import_diffusionrenderer_priors_to_dir.py \
+    --sample-dir "$GBUFFER" \
+    --prior-dir "$DR_PRIORS" \
+    --output-dir "$PRIORS" \
+    --match-chunks
+
+확인:
+
+  test -s "$PRIORS/frame_0000.pt"
+
+[E] 새 AEGIR 학습
+
+긴 SSH 작업은 tmux 안에서 실행한다. 현재 CLI에는 AEGIR checkpoint resume 옵션이
+없으므로 SSH 연결이 끊겨 프로세스가 종료되면 자동 재개되지 않는다.
+
+  tmux new -s aegir_conference
+
+tmux 안에서:
+
+  source /home/megapose/miniconda3/etc/profile.d/conda.sh
+  conda activate dnsplatter
+  cd "$ROOT"
+
+  export CUDA_ROOT="$CONDA_PREFIX/lib/python3.10/site-packages/nvidia/cu13"
+  export CUDA_HOME="$CUDA_ROOT"
+  export TORCH_EXTENSIONS_DIR="$ROOT/.torch_extensions"
+  export PATH="$CUDA_ROOT/bin:$PATH"
+  export LD_LIBRARY_PATH="$CUDA_ROOT/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  export PYTHONPATH="$ROOT"
+
+  python -m aegir.cli train-gaussian-scene \
+    --dnsplatter-checkpoint "$DN_CKPT" \
+    --nerfstudio-dir "$DATA" \
+    --prior-dir "$PRIORS" \
+    --output "$ROOT/outputs/aegir_fipt_real_conference_shared_20k.pt" \
+    --device cuda \
+    --steps 20000 \
+    --image-size 128 \
+    --max-views 191 \
+    --max-emitters 16 \
+    --geometry-lr 1e-5 \
+    --material-lr 1e-3 \
+    --emitter-lr 1e-3 \
+    --emitter-final-lr 1e-4 \
+    --freeze-start 5000 \
+    --freeze-end 15000 \
+    --checkpoint-every 5000 \
+    --num-brdf-samples 128 \
+    --num-light-samples 128 \
+    --rays-per-step 1024 \
+    2>&1 | tee "$ROOT/outputs/fipt_real_conference_shared_20k.log"
+
+주의: IRGS tracer는 기본으로 켜진다. --no-visibility를 붙이면 논문에 가까워지지
+않으므로 디버깅 외에는 사용하지 않는다.
+
+OOM이면 먼저 primary patch만 낮춘다.
+
+  --rays-per-step 512
+
+그 다음에도 부족하면 sample 수를 낮춰 시험한다.
+
+  --num-brdf-samples 64 --num-light-samples 64
+
+최종 비교용 학습은 1024/128/128로 되돌린다.
+
+[F] 결과 검사
+
+  python -m aegir.cli inspect \
+    --checkpoint "$ROOT/outputs/aegir_fipt_real_conference_shared_20k.pt" \
+    --nerfstudio-dir "$DATA" \
+    --prior-dir "$PRIORS" \
+    --output-dir "$ROOT/outputs/inspect_fipt_real_conference_shared_20k" \
+    --device cuda \
+    --max-views 191 \
+    --render-samples 16
+
+  python -m aegir.cli inspect-emitters \
+    --checkpoint "$ROOT/outputs/aegir_fipt_real_conference_shared_20k.pt" \
+    --nerfstudio-dir "$DATA" \
+    --prior-dir "$PRIORS" \
+    --output-dir "$ROOT/outputs/emitters_fipt_real_conference_shared_20k" \
+    --device cuda \
+    --max-views 191
+
+
+============================================================
+7. 이미 준비된 dataset으로 AEGIR만 돌릴 때의 최소 명령
+============================================================
+
+DN_CKPT, DATA/transforms.json, PRIORS/frame_0000.pt가 이미 있으면 전처리를
+건너뛰고 아래만 실행한다.
+
+  cd /home/megapose/hohyun_ws/AEGIR
+  conda activate dnsplatter
+
+  python -m aegir.cli train-gaussian-scene \
+    --dnsplatter-checkpoint /absolute/path/to/step-000009999.ckpt \
+    --nerfstudio-dir /absolute/path/to/nerfstudio_dataset \
+    --prior-dir /absolute/path/to/material_prior_pt_dir \
+    --output outputs/aegir_scene_shared_20k.pt \
+    --device cuda \
+    --steps 20000 \
+    --image-size 128 \
+    --max-emitters 16 \
+    --checkpoint-every 5000 \
+    --num-brdf-samples 128 \
+    --num-light-samples 128 \
+    --rays-per-step 1024
+
+warehouse와 HyperSim 서버 경로가 실제로 존재하면 기존 wrapper도 사용할 수 있다.
+
+  bash scripts/run_warehouse_up25_shared_20k.sh
+  bash scripts/run_hypersim_ai_1_4_shared_20k.sh
+
+단, 두 wrapper는 /home/megapose/hohyun_ws 경로와 CUDA 13 환경을 가정하고
+입력 파일이 하나라도 없으면 즉시 종료한다.
+
+
+============================================================
+8. 시작 전 체크리스트
+============================================================
+
+[ ] nvidia-smi에서 사용할 GPU와 여유 VRAM 확인
+[ ] conda activate dnsplatter 후 torch.cuda.is_available() == True
+[ ] diff_surfel_rasterization import 성공
+[ ] surfel_tracer import 성공
+[x] pytest 통과 (21 passed)
+[x] DATA/transforms.json 존재 (13 scenes, 2,137 frames)
+[x] transforms pose와 z-depth를 world normal로 검증
+[x] transforms frame에 radiance_hdr_file_path 존재
+[ ] DN_CKPT 옆 run root에 dataparser_transforms.json 존재
+[ ] PRIORS/frame_0000.pt에 prior_albedo/roughness/metallic 존재
+[ ] tmux 안에서 학습 실행
+[ ] 첫 iteration에서 OOM/NaN 여부 확인
+[ ] step05000 checkpoint와 log 생성 확인
+
+FIPT-Real, FIPT-Synthetic, Isaac Sim, HyperSim 변환은 모두 완료됐다.
+다음 미완료 항목은 각 scene DN-Splatter 초기화, DiffusionRenderer
+input/material prior 생성, 최종 AEGIR 학습이다.
+
+
+============================================================
+9. 현재 서버 dataset 변환 완료 상태
+============================================================
+
+모든 출력은 다음 경로 아래에 있다.
+
+  /home/tako/hohyun_ws/datasets/aegir_nerfstudio
+
+완료된 scene과 frame 수:
+
+  fipt_real_conference                              191
+  fipt_real_classroom                               278
+  fipt_synthetic_bathroom                           122
+  fipt_synthetic_bedroom                            222
+  fipt_synthetic_kitchen                            217
+  fipt_synthetic_livingroom                         227
+  isaacsim_warehouse_all_lights_hdr_102_up25        102
+  hypersim_ai_001_004                               100
+  hypersim_ai_004_002                               180
+  hypersim_ai_010_006                               100
+  hypersim_ai_015_003                                99
+  hypersim_ai_032_001                               100
+  hypersim_ai_034_002                               199
+  합계: 13 scenes, 2,137 frames
+
+추가 converter:
+
+  scripts/export_isaacsim_nerfstudio.py
+  scripts/export_fipt_synthetic_nerfstudio.py
+  scripts/export_hypersim_nerfstudio.py
+
+공통 출력 규약:
+
+  camera pose: Nerfstudio OpenGL c2w
+  translation/depth: meters
+  depth: float32 camera-z depth
+  radiance HDR: unclipped float32 RGB NumPy
+  DN depth_unit_scale_factor: 1.0
+
+FIPT-Synthetic 주의사항 (2026-08-12 수정):
+
+  source transforms.json의 카메라 축은 FIPT 공식 loader 기준
+  left-up-forward다. Nerfstudio OpenGL right-up-back으로 내보낼 때는
+  source c2w 오른쪽에 diag(-1, 1, -1, 1)을 곱한다. source Normal EXR은
+  Blender world-space normal이므로, 수정된 c2w rotation의 transpose로
+  OpenGL camera-space normal로 변환해서 normals_camera에 저장한다.
+  source pose와 Normal EXR을 그대로 복사하면 안 된다.
+
+  2026-08-12에 bathroom/bedroom/kitchen/livingroom 122/222/217/227 frames를
+  수정된 convention으로 atomic overwrite 재변환했다. 전 frame pose는
+  source_c2w @ diag(-1,1,-1,1)과 max error 0이며, rotation determinant는
+  전부 +1, modality 누락은 0이다. 각 scene 처음/중간/마지막 frame에서
+  depth로 계산한 geometric normal과 출력 camera normal의 median dot은
+  0.99998 이상이다. 재변환으로 기존 bathroom의 잘못된 colmap 폴더도
+  제거됐다. 기존 external_runs/colmap_manual의 2026-08-11 FIPT 결과는
+  비교 기록일 뿐 재사용하면 안 된다.
+
+
+HyperSim은 source ray-distance를 프레임별 카메라 모델로 z-depth로 변환한다.
+source orientation이 비직교인 ai_015_003도 projection과 orientation을 함께
+RQ 분해해서 올바른 SO(3) pose와 프레임별 intrinsics를 만든다. HyperSim
+transforms.json에는 top-level fl_x/fl_y/cx/cy를 넣지 않는다. 이 값을 넣으면
+Nerfstudio가 프레임별 intrinsics를 무시하므로 다시 추가하면 안 된다.
+
+HyperSim geometry 검증 결과(position median error meters / normal median dot):
+
+  ai_001_004  0.001907 / 1.000000000
+  ai_004_002  0.001744 / 0.999999997
+  ai_010_006  0.001033 / 0.999999997
+  ai_015_003  0.002293 / 0.999999999
+  ai_032_001  0.001001 / 1.000000000
+  ai_034_002  0.002974 / 1.000000000
+
+최종 검증:
+
+  - 2,137개 frame의 modality 경로 존재 여부 확인
+  - 모든 c2w rotation의 직교성 및 determinant +1 확인
+  - 각 scene 처음/중간/마지막 NPY/PNG dtype, shape, finite 확인
+  - DN-Splatter NormalNerfstudio parser로 13개 train/val 로딩 확인
+  - AEGIR load_nerfstudio_frame으로 scene별 3개 frame 로딩 확인
+  - AEGIR/tests 전체 22 passed 및 compileall 통과 (2026-08-12)
+
+
+============================================================
+10. fixed-pose COLMAP 및 DN-Splatter 10k 배치 (2026-08-11)
+============================================================
+
+확정된 pose 정책:
+
+  - transforms.json에 camera pose가 있으면 그 pose를 고정한다.
+  - 이 경우 COLMAP은 feature/descriptor matching과 sparse point
+    triangulation에만 사용한다.
+  - camera pose가 없는 새 데이터만 COLMAP mapper로 pose와 point cloud를
+    함께 추정한다.
+
+현재 13개 scene은 전부 pose가 있으므로 모두 fixed-pose 경로다.
+
+구현:
+
+  scripts/prepare_fixed_pose_colmap.py
+
+이 스크립트는 프레임별 intrinsics까지 COLMAP DB에 정확히 넣고,
+Nerfstudio OpenGL c2w를 COLMAP OpenCV w2c로 변환한다. matcher의 raw
+descriptor match를 공급 pose의 epipolar geometry로 검증한 뒤
+point_triangulator를 실행한다. intrinsics/pose refinement는 모두 끄며,
+출력 images.bin pose가 입력과 1e-6 이내인지 검사에 통과해야만 다음을
+transforms.json에 게시한다.
+
+  ply_file_path: colmap/sparse_pc.ply
+  applied_transform: identity 3x4
+
+identity applied_transform은 pose를 바꾸는 값이 아니다. colmap/sparse/0이
+생겼다는 이유만으로 Nerfstudio가 예전 COLMAP axis swap을 암묵 적용하는 것을
+막아 DN checkpoint와 AEGIR camera가 같은 world 좌표를 유지하게 한다.
+
+bathroom 실검증 (아래 2026-08-11 수치는 잘못된 FIPT 축 convention으로
+생성되어 폐기 대상이며, 2026-08-12 재실행 결과로 교체해야 함):
+
+수정 pose의 bedroom 기존 raw SIFT DB 사전검증 (2026-08-12):
+  4 px Sampson threshold 통과 129,908 / 532,383 matches (24.40%)
+  nonempty image pairs 9,924. fixed-pose COLMAP 재실행 준비 완료.
+
+
+  frames: 122
+  fixed-pose verified matches: 2,039 / 886 image pairs
+  sparse points: 259
+  max rotation error: 5.96e-8 rad
+  max translation error: 0 m
+  DN parser seed points: 259
+  DN dataparser transform: identity, scale 1.0
+  DN 5-step CUDA smoke: 성공, step-000000004.ckpt finite
+  camera optimizer: off
+
+CUDA/환경:
+
+  COLMAP 전용 환경: /home/tako/miniconda3/envs/aegir_colmap
+  DN 환경:          /home/tako/miniconda3/envs/dnsplatter
+  gsplat CUDA cache:
+    AEGIR/outputs/torch_extensions_cache
+  pip CUDA 13 linker stub:
+    AEGIR/outputs/cuda_link_stubs/libcudart.so
+
+base나 다른 기존 conda 환경은 건드리지 않았다.
+
+전체 배치:
+
+  [주의: 2026-08-12 이전 depth-supervised 비교용 설정이다. 새 production
+  학습에 그대로 사용하지 않는다.]
+
+  cd /home/tako/hohyun_ws/AEGIR
+  tmux new-session -d -s aegir-dnsplatter-all \
+    'cd /home/tako/hohyun_ws/AEGIR && bash scripts/run_all_dnsplatter_10k.sh'
+
+배치는 scene별로 COLMAP을 완료한 뒤 DN-Splatter 10k를 순차 실행한다.
+depth lambda 0.2, depth-derived normal supervision, metric depth scale 1.0,
+load_3D_points True, pose orientation/center/scale 변경 없음, camera optimizer
+off다. 1,000 step마다 최신 checkpoint를 저장하며 재실행 시 최신 checkpoint를
+이어간다. 한 scene이 실패해도 다음 scene을 계속한다.
+
+2026-08-12 DN-Splatter production supervision 정책 변경:
+
+  - GT camera pose/intrinsics: 사용, camera optimizer off로 고정
+  - RGB: 사용
+  - validity mask: 사용 가능. FIPT-Synthetic bedroom mask는 222장 모두
+    valid fraction 1.0이라 실제로 제외되는 pixel이 없다.
+  - COLMAP sparse initialization: 사용. RGB matching + fixed pose로 생성하며
+    GT depth는 COLMAP에도 사용하지 않는다.
+  - GT depth/GT normal/material/HDR: 학습 입력에서 제거하고 사용하지 않는다.
+  - use_depth_loss False, load_depths False, load_normals False
+  - normal_supervision=depth는 DN 코드상 model-rendered depth에서 normal을
+    만드는 self-consistency regularization이며 GT depth를 참조하지 않는다.
+
+bedroom 전용 sanitized dataset view:
+
+  datasets/aegir_nerfstudio/fipt_synthetic_bedroom_rgb_pose_mask
+
+dataparser 검증: train RGB/mask 208/208, depth_filenames None,
+normal_filenames None, COLMAP seed 14,097, transform identity, scale 1.0.
+
+상태 확인:
+
+  tmux list-sessions
+  tail -f /home/tako/hohyun_ws/AEGIR/logs/dnsplatter_10k.status
+  tail -f /home/tako/hohyun_ws/AEGIR/logs/dnsplatter_10k/<scene>.log
+  nvidia-smi
+
+최종 checkpoint 규약:
+
+  AEGIR/outputs/dn_splatter_10k/<scene>/dn-splatter/
+    fixed_pose_colmap_10k/nerfstudio_models/step-000009999.ckpt
+
+2026-08-12 GT-depth 비활성화 crash 수정:
+
+  증상:
+    dn_dataset.py get_metadata에서 sensor_depth_filenames가 None인데 indexing
+    하여 TypeError: 'NoneType' object is not subscriptable.
+
+  원인:
+    normal_nerfstudio parser가 load_depths=False에도 depth_filenames=None 키를
+    metadata에 넣었고, dataset/datamanager가 값이 아니라 key 존재만 보고
+    depth가 있다고 판단했다.
+
+  수정 파일:
+    external/dn-splatter/dn_splatter/data/normal_nerfstudio.py
+    external/dn-splatter/dn_splatter/data/dn_dataset.py
+    external/dn-splatter/dn_splatter/dn_datamanager.py
+
+  검증:
+    RGB+pose+mask sample keys는 image/image_idx/mask뿐이며 sensor_depth가 없다.
+    기존 load_depths=True sample은 sensor_depth를 정상 유지한다.
+    CUDA 2-step smoke 완료, seed 14,097개, checkpoint:
+    AEGIR/outputs/dn_splatter_rgb_pose_mask_smoke/fipt_synthetic_bedroom/
+      dn-splatter/no_gt_depth_smoke_cuda/nerfstudio_models/step-000000001.ckpt
+
+2026-08-12 나머지 fixed-pose COLMAP scene의 GT-depth-free DN batch:
+
+  실행 스크립트:
+    AEGIR/scripts/run_remaining_colmap_dnsplatter_rgb_pose_mask_10k.sh
+
+  기본 scene:
+    fipt_synthetic_bathroom   (COLMAP seed 5,458)
+    fipt_synthetic_kitchen    (COLMAP seed 13,885)
+    fipt_synthetic_livingroom (COLMAP seed 13,201)
+
+  각 scene에 대해 RGB+고정 pose+mask+COLMAP seed 전용 view를 만들고,
+  GT depth/normal/material/HDR가 parser sample에 없는지 검사한 뒤 10k 학습한다.
+  camera optimizer off, load_depths/load_normals false, depth loss false다.
+  중간 checkpoint가 있으면 재개하고 final checkpoint가 있으면 학습을 건너뛴다.
+  학습 완료 후 전체 Gaussian을 62-property SuperSplat binary PLY로 자동 export한다.
+
+  실행:
+    tmux new-session -d -s dn-remaining-rgbpose \
+      'cd /home/tako/hohyun_ws/AEGIR && bash scripts/run_remaining_colmap_dnsplatter_rgb_pose_mask_10k.sh'
+
+  상태:
+    tail -f AEGIR/logs/dnsplatter_rgb_pose_mask_remaining_10k/status.tsv
+    tail -f AEGIR/logs/dnsplatter_rgb_pose_mask_remaining_10k/<scene>.log
+
+  PLY:
+    AEGIR/exports/supersplat/<scene>_rgb_pose_mask/splat.ply
+
+  현재 fixed-pose COLMAP 완료 scene은 FIPT-Synthetic 4개뿐이다. bedroom은 이미
+  완료했고 위 batch 기본 목록에서 제외했다. FIPT-Real/HyperSim/Isaac Sim은 아직
+  colmap/sparse_pc.ply와 fixed_pose_complete.json이 없으므로 이 batch 대상이 아니다.
+
+2026-08-12 13:11 위 RGB-only batch 폐기 및 ZoeDepth+Pearson으로 교체:
+
+  폐기한 RGB-only/no-mono checkpoint와 output directory는 2026-08-12에 삭제했다.
+  남아 있던 AEGIR/logs/dnsplatter_10k.log와 .status도 삭제했으며, 현재 workspace의
+  DN checkpoint는 dn_splatter_zoe_pearson_10k 아래 Zoe+Pearson 결과뿐이다.
+
+  같은 실행 스크립트는 이제 다음 설정으로 교체됐다:
+    - RGB에서 pretrained ZoeD_N mono depth 생성 (GT depth 아님)
+    - raw ZoeDepth만 mono_depth_zoe_raw에 분리; *_aligned.npy와 GT depth 배제
+    - PearsonDepth loss, depth_lambda 0.2
+    - depth_unit_scale_factor 0.001
+    - GT pose/intrinsics 고정, camera optimizer off
+    - COLMAP sparse point는 Gaussian 초기화에 사용
+    - GT normal/material/HDR 미사용
+    - 완료 후 SuperSplat 62-property PLY 자동 export
+
+  새 output:
+    AEGIR/outputs/dn_splatter_zoe_pearson_10k/<scene>/dn-splatter/
+      zoe_pearson_colmap_10k/nerfstudio_models/step-000009999.ckpt
+    단, bathroom은 아래 resume bug로 step-000012000.ckpt이며 Zoe+Pearson 설정은
+    config와 최초/재개 로그 양쪽에서 검증했다.
+
+  새 PLY:
+    AEGIR/exports/supersplat/<scene>_zoe_pearson/splat.ply
+
+  새 log/status:
+    AEGIR/logs/dnsplatter_zoe_pearson_remaining_10k/
+
+  현재 batch/tmux:
+    2026-08-12 14:08 FIPT-Synthetic 4-scene batch 종료. 실행 프로세스 없음.
+
+  bathroom 검증:
+    raw ZoeDepth 122/122 finite positive, train split 109/109 일치
+    parser sample keys: image/image_idx/mask/sensor_depth
+    depth sample range 1.403..2.751 m, COLMAP seed 5,458
+    최초 Zoe+Pearson run은 scratch에서 시작해 step 2,000까지 간 뒤 runner 재시작으로
+    중단됐다. 같은 Zoe+Pearson checkpoint를 resume했으나 Nerfstudio의
+    max_num_iterations가 추가 iteration 수여서 step 12,000까지 학습됐다.
+    기존 스크립트가 step-000009999.ckpt만 찾아 실패로 오판했다.
+    2026-08-12 14:11 스크립트를 고쳐 resume 시 9,999까지 남은 iteration만 실행하고,
+    최신 step이 9,999 이상이면 정상 완료로 인정하며, 기존 config가 Zoe dataset +
+    load_depths=true + PearsonDepth인지 검증하도록 했다. bathroom step 12,000은
+    검증 후 정상 등록했고 SuperSplat PLY export를 완료했다.
+
+  Zoe/MiDaS cache는 workspace 밖이 아니라 다음 경로에 고정:
+    /home/tako/hohyun_ws/.cache/torch
+
+============================================================
+DiffusionRenderer material-prior 연결 완료 (2026-08-12)
+============================================================
+
+현재 서버에서 다음을 실제 end-to-end 검증했다.
+
+- DiffusionRenderer repo: /home/tako/hohyun_ws/external/diffusion-renderer
+- commit: 8fcf0057ad3422139cd53281037025ff725d34e9
+- env: /home/tako/miniconda3/envs/diffusion_renderer
+- inverse weight: checkpoints/diffusion_renderer-inverse-svd
+- GPU: RTX PRO 6000 Blackwell, CUDA 13
+- 입력은 RGB sequence + 존재할 때 invalid-pixel mask뿐이다.
+- GT depth와 GT normal은 DiffusionRenderer 입력, prior .pt, AEGIR loss 어느 곳에도 넣지 않는다.
+- 출력은 prior_albedo, prior_roughness, prior_metallic 세 필드만 사용한다.
+- frame_XXXX.pt의 XXXX는 transforms.json 원본 frame index다.
+- AEGIR은 DN checkpoint에서 shared Gaussian geometry를 만들고 매 iteration 임시 G-buffer를 rasterize한다.
+  DiffusionRenderer 결과는 이 동적 G-buffer의 material map에 걸리는 2D pseudo-GT loss다.
+
+복원/추가된 스크립트:
+
+  scripts/prepare_diffusionrenderer_input.py
+  scripts/run_diffusionrenderer_priors.py
+  scripts/import_diffusionrenderer_priors_to_dir.py
+  scripts/run_diffusionrenderer_material_priors.sh
+
+upstream inference_svd_rgbx.py도 cond_mode=skip에서 사용하지 않는 2.5GB CLIP encoder를
+다운로드하지 않도록 수정했다. 명시적으로 나눈 마지막 짧은 chunk도 처리하도록
+wrapper가 overlap_n_frames=0을 전달한다.
+
+bedroom 전체 material prior 생성 완료:
+
+  input:   /home/tako/hohyun_ws/datasets/diffusionrenderer_input/fipt_synthetic_bedroom
+  result:  /home/tako/hohyun_ws/datasets/diffusionrenderer_results/fipt_synthetic_bedroom
+  priors:  /home/tako/hohyun_ws/datasets/diffusionrenderer_priors/fipt_synthetic_bedroom
+  frames:  222 (train 208, val/test 14)
+  setting: inverse SVD, 20 steps, resolution [256,256], 24-frame chunks, 3 passes
+  fields:  prior_albedo, prior_roughness, prior_metallic
+  GT geometry fields: 없음
+
+다른 scene의 material prior 생성 명령:
+
+  cd /home/tako/hohyun_ws
+  bash AEGIR/scripts/run_diffusionrenderer_material_priors.sh \
+    datasets/aegir_nerfstudio/SCENE_NAME \
+    SCENE_NAME \
+    256 \
+    20
+
+최종 AEGIR 학습에는 반드시 다음을 전달한다.
+
+  --prior-dir /home/tako/hohyun_ws/datasets/diffusionrenderer_priors/SCENE_NAME
+
+MultiViewSceneDataset은 --prior-dir이 지정되면 material prior 3종이 모두 있는지 강제한다.
+한 필드라도 없으면 학습 시작 전에 실패하므로 material prior 없이 조용히 학습되지 않는다.
+검증 결과: AEGIR tests 30 passed.
+
+회전 anisotropic emitter intersection 수정 완료 (2026-08-12)
+
+  파일: AEGIR/aegir/emitters.py
+  수정: row-vector world-to-local을 v @ R로 통일
+  대상: intersect(), radiance(); radiance_for_ids() convention과 일치
+  검증: 45도 회전 scales (3,1,0.5)의 축별 교차거리 3/1/0.5
+  추가 검증: radiance API exact 일치, quaternion/scale/spread gradient finite
+  전체 CPU test: 32 passed

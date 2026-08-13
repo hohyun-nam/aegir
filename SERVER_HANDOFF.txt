@@ -1,0 +1,70 @@
+AEGIR 현재 서버 handoff (authoritative)
+갱신일: 2026-08-13
+
+이 파일만 현재 실행 경로 안내로 사용한다. 2026-08-11 이전의 /home/tako,
+/home/megapose, /home/hohyun 및 AEGIR_old 명령은 현재 환경에서 실행하지 않는다.
+옛 문서는 docs/archive/SERVER_HANDOFF_legacy_2026-08-11.txt에 보관했다.
+
+현재 경로
+
+  BASE=/workspace
+  WORKSPACE=/workspace/hohyun_ws
+  AEGIR=/workspace/hohyun_ws/AEGIR
+  DATASETS=/workspace/hohyun_ws/datasets
+  EXTERNAL=/workspace/hohyun_ws/external
+  DNS_ENV=/workspace/.conda/envs/dnsplatter
+  DR_ENV=/workspace/.conda/envs/diffusion_renderer
+  COLMAP_ENV=/workspace/.conda/envs/aegir_colmap
+
+AEGIR_old
+
+  AEGIR_old는 현재 없고 필요하지 않다. 현재 AEGIR은 shared planar Gaussian
+  구현이다. ../AEGIR_old, AEGIR/.cuda -> ../AEGIR_old, AEGIR/.torch_extensions
+  -> ../AEGIR_old 같은 링크를 만들지 않는다.
+
+필수 shell 설정
+
+  export BASE=/workspace
+  export WORKSPACE="$BASE/hohyun_ws"
+  export ROOT="$WORKSPACE/AEGIR"
+  export DNS_ENV="$BASE/.conda/envs/dnsplatter"
+  export DR_ENV="$BASE/.conda/envs/diffusion_renderer"
+  export COLMAP_ENV="$BASE/.conda/envs/aegir_colmap"
+  export PYTHONPATH="$ROOT:$WORKSPACE/external/dn-splatter${PYTHONPATH:+:$PYTHONPATH}"
+
+현재 extension/cache 링크
+
+  $ROOT/.cuda -> $BASE/.conda/envs/dnsplatter/lib/python3.10/site-packages/nvidia/cu13
+  $ROOT/.torch_extensions -> $ROOT/outputs/torch_extensions_cache_workspace
+
+상태 문서
+
+  README.md                  현재 사용법과 representation
+  AEGIR_REMAINING_WORK.md    완료/미완료 항목과 검증 기록
+  docs/SOURCE_PROVENANCE.md  Git revision, local patch, environment 상태
+  docs/LEGACY_CHECKPOINTS.md checkpoint 사용 가능 범위
+
+현재 실행 원칙
+
+  - GPU 작업 VRAM 한도는 24 GiB다.
+  - DN-Splatter depth는 RGB-derived ZoeDepth + Pearson만 production으로 쓴다.
+  - supplied pose가 있는 데이터는 fixed-pose COLMAP을 사용한다.
+  - DiffusionRenderer는 albedo/roughness/metallic material prior만 사용한다.
+  - smoke checkpoint와 2026-08-06 AEGIR checkpoint는 final 학습에 resume하지 않는다.
+  - 장시간 AEGIR 20k 학습은 코드 정합 작업 완료 후 별도로 시작한다.
+
+빠른 검증
+
+  cd "$ROOT"
+  "$DNS_ENV/bin/python" -m pytest -q
+  nvidia-smi
+
+현재 DN-Splatter batch 상태
+
+  tail -n 0 -f "$ROOT/logs/dnsplatter_zoe_pearson_remaining_10k/status.tsv"
+
+Git
+
+  AEGIR은 이 디렉터리 자체를 Git repository로 관리한다. outputs, logs,
+  exports, CUDA build/cache와 설치 환경은 추적하지 않는다. 외부 repository의
+  고정 revision 및 local modification은 docs/SOURCE_PROVENANCE.md를 확인한다.
