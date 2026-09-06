@@ -260,7 +260,6 @@ def _run_training(
     config.render.num_brdf_samples = 2
     config.render.num_light_samples = 2
     config.render.num_bounce_samples = 1
-    config.render.bounce_proxy_points = 128
     config.render.bounce_chunk_size = 64
     config.adaptive.max_emitters = 2
     train_shared_gaussians(
@@ -283,7 +282,7 @@ def _run_training(
             "primary_rays_per_step": config.training.rays_per_step,
             "brdf_samples_per_ray": config.render.num_brdf_samples,
             "light_samples_per_ray": config.render.num_light_samples,
-            "bounce_samples_per_ray": config.render.num_bounce_samples,
+            "inference_bounce_samples_per_hit": config.render.num_bounce_samples,
             "max_views": 1,
             "max_gaussians": max_gaussians,
         },

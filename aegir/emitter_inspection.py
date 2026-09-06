@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-from PIL import Image, ImageDraw
 import torch
+from PIL import Image, ImageDraw
 from torch import Tensor
 
 from .math_utils import quat_to_matrix, safe_normalize
@@ -16,6 +16,7 @@ from .math_utils import quat_to_matrix, safe_normalize
 INITIAL_COLOR = (0, 220, 255)
 FINAL_COLOR = (80, 255, 80)
 MOVE_COLOR = (255, 220, 40)
+AXIS_GAIN_LABELS = ("+X", "-X", "+Y", "-Y", "+Z", "-Z")
 
 
 def match_emitter_centers(initial: Tensor, final: Tensor) -> list[tuple[int, int, float]]:
@@ -83,6 +84,11 @@ def _cpu_state(state: dict[str, Tensor]) -> dict[str, Tensor]:
 
 def _emitter_record(state: dict[str, Tensor], index: int) -> dict[str, Any]:
     scales = state["scales"][index]
+    axis_gains = state.get("axis_gains")
+    if axis_gains is None:
+        directional = torch.ones(6)
+    else:
+        directional = axis_gains[index]
     record = {
         "index": index,
         "center": state["centers"][index].tolist(),
@@ -90,6 +96,11 @@ def _emitter_record(state: dict[str, Tensor], index: int) -> dict[str, Any]:
         "anisotropy": float(scales.max() / scales.min().clamp_min(1.0e-8)),
         "quaternion": state["quaternions"][index].tolist(),
         "color": state["colors"][index].tolist(),
+        "common_rgb": state["colors"][index].tolist(),
+        "axis_gains": {
+            label: float(value)
+            for label, value in zip(AXIS_GAIN_LABELS, directional, strict=True)
+        },
     }
     return record
 

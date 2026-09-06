@@ -1,17 +1,45 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 import os
-from pathlib import Path
 import shutil
 import tempfile
-from typing import Iterator
+from collections.abc import Iterator
+from contextlib import contextmanager
+from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
-
 OPENCV_TO_OPENGL = np.diag([1.0, -1.0, -1.0])
+HELDOUT_SPLIT_FORMAT = "aegir-heldout-split-v1"
+
+
+def independent_val_test_split(
+    train_filenames: list[str],
+    heldout_filenames: list[str],
+) -> tuple[list[str], list[str], dict]:
+    """Preserve train identity and interleave an ordered held-out view pool."""
+
+    if len(train_filenames) != len(set(train_filenames)):
+        raise ValueError("training filenames must be unique")
+    if len(heldout_filenames) != len(set(heldout_filenames)):
+        raise ValueError("held-out filenames must be unique")
+    overlap = set(train_filenames).intersection(heldout_filenames)
+    if overlap:
+        raise ValueError(f"training and held-out filenames overlap at {min(overlap)!r}")
+    val_filenames = heldout_filenames[::2]
+    test_filenames = heldout_filenames[1::2]
+    metadata = {
+        "format": HELDOUT_SPLIT_FORMAT,
+        "policy": "preserve_train_and_alternate_original_shared_heldout",
+        "original_shared_heldout_filenames": heldout_filenames,
+        "val_filenames": val_filenames,
+        "test_filenames": test_filenames,
+        "train_frames": len(train_filenames),
+        "val_frames": len(val_filenames),
+        "test_frames": len(test_filenames),
+    }
+    return val_filenames, test_filenames, metadata
 
 
 @contextmanager
@@ -63,8 +91,11 @@ def read_exr(path: str | Path, *, rgb: bool) -> np.ndarray:
     return value.astype(np.float32, copy=True)
 
 
-def tone_map_hdr(rgb: np.ndarray, valid_mask: np.ndarray) -> np.ndarray:
-    """Apply the official HyperSim 90th-percentile tone-mapping strategy."""
+def tone_map_hdr_with_exposure(
+    rgb: np.ndarray,
+    valid_mask: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    """Apply HyperSim's display mapping and return its per-frame exposure scale."""
 
     if rgb.ndim != 3 or rgb.shape[-1] != 3 or valid_mask.shape != rgb.shape[:2]:
         raise ValueError("tone-map RGB and mask shapes do not match")
@@ -72,12 +103,20 @@ def tone_map_hdr(rgb: np.ndarray, valid_mask: np.ndarray) -> np.ndarray:
     if np.any(valid):
         brightness = 0.3 * rgb[..., 0] + 0.59 * rgb[..., 1] + 0.11 * rgb[..., 2]
         percentile = float(np.percentile(brightness[valid], 90.0))
-        scale = 0.0 if percentile < 1.0e-4 else 0.8 ** 2.2 / percentile
+        scale = 0.0 if percentile < 1.0e-4 else 0.8**2.2 / percentile
     else:
         scale = 1.0
     mapped = np.power(np.maximum(scale * np.where(np.isfinite(rgb), rgb, 0.0), 0.0), 1.0 / 2.2)
     mapped[~valid_mask] = 0.0
-    return np.rint(np.clip(mapped, 0.0, 1.0) * 255.0).astype(np.uint8)
+    encoded = np.rint(np.clip(mapped, 0.0, 1.0) * 255.0).astype(np.uint8)
+    return encoded, scale
+
+
+def tone_map_hdr(rgb: np.ndarray, valid_mask: np.ndarray) -> np.ndarray:
+    """Backward-compatible image-only wrapper for the HyperSim display mapping."""
+
+    mapped, _ = tone_map_hdr_with_exposure(rgb, valid_mask)
+    return mapped
 
 
 def encode_normal_rgb(normal: np.ndarray, valid_mask: np.ndarray) -> np.ndarray:
@@ -101,9 +140,7 @@ def ray_distance_to_z(
 ) -> np.ndarray:
     height, width = distance.shape
     yy, xx = np.mgrid[:height, :width]
-    norm = np.sqrt(
-        ((xx - cx) / fl_x) ** 2 + ((yy - cy) / fl_y) ** 2 + 1.0
-    )
+    norm = np.sqrt(((xx - cx) / fl_x) ** 2 + ((yy - cy) / fl_y) ** 2 + 1.0)
     return (distance / norm).astype(np.float32)
 
 

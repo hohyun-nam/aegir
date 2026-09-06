@@ -3,8 +3,8 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-from pathlib import Path
 import re
+from pathlib import Path
 from typing import Any
 
 import h5py
@@ -15,13 +15,13 @@ from aegir.conversion_common import (
     OPENCV_TO_OPENGL,
     atomic_output_dir,
     encode_normal_rgb,
+    independent_val_test_split,
     ray_distance_to_z,
     save_mask,
     save_rgb,
-    tone_map_hdr,
+    tone_map_hdr_with_exposure,
     validate_c2w,
 )
-
 
 KNOWN_STANDARD_PROJECTION_SCENES = {
     "ai_001_004",
@@ -180,13 +180,9 @@ def rectify_world_camera(
     a proper rotation for the exported Nerfstudio pose.
     """
 
-    if source_camera_to_world.shape != (3, 3) or not np.isfinite(
-        source_camera_to_world
-    ).all():
+    if source_camera_to_world.shape != (3, 3) or not np.isfinite(source_camera_to_world).all():
         raise ValueError("invalid HyperSim camera-to-world orientation")
-    pixel_world_camera = _pixel_projection(projection, width, height) @ np.linalg.inv(
-        source_camera_to_world
-    )
+    pixel_world_camera = _pixel_projection(projection, width, height) @ np.linalg.inv(source_camera_to_world)
     return _factor_pinhole(pixel_world_camera)
 
 
@@ -233,9 +229,7 @@ def convert_hypersim_scene(
             raise FileNotFoundError(f"missing HyperSim image directories for {camera_name}")
         frame_indices = _read_hdf5(camera_dir / "camera_keyframe_frame_indices.hdf5").astype(int)
         positions = _read_hdf5(camera_dir / "camera_keyframe_positions.hdf5").astype(np.float64)
-        orientations = _read_hdf5(camera_dir / "camera_keyframe_orientations.hdf5").astype(
-            np.float64
-        )
+        orientations = _read_hdf5(camera_dir / "camera_keyframe_orientations.hdf5").astype(np.float64)
         if len(frame_indices) != len(positions) or len(positions) != len(orientations):
             raise ValueError(f"HyperSim camera array length mismatch for {camera_name}")
         keyframe_by_frame = {int(frame): index for index, frame in enumerate(frame_indices)}
@@ -267,9 +261,7 @@ def convert_hypersim_scene(
 
     first_record = records[0]
     first_payload = camera_payloads[first_record["camera_name"]]
-    first_color = _read_hdf5(
-        first_payload["final_dir"] / f"frame.{first_record['frame_id']:04d}.color.hdf5"
-    )
+    first_color = _read_hdf5(first_payload["final_dir"] / f"frame.{first_record['frame_id']:04d}.color.hdf5")
     if first_color.ndim != 3 or first_color.shape[-1] != 3:
         raise ValueError(f"unexpected HyperSim color shape: {first_color.shape}")
     height, width = first_color.shape[:2]
@@ -400,15 +392,9 @@ def convert_hypersim_scene(
                 predicted_length = np.linalg.norm(predicted_world_normal, axis=-1, keepdims=True)
                 reference_length = np.linalg.norm(normal_world_reference, axis=-1, keepdims=True)
                 normal_valid = sample_valid & np.isfinite(normal_world_reference).all(axis=-1)
-                normal_valid &= (reference_length[..., 0] > 0.5) & (
-                    predicted_length[..., 0] > 0.5
-                )
-                predicted_normalized = predicted_world_normal / np.maximum(
-                    predicted_length, 1.0e-12
-                )
-                reference_normalized = normal_world_reference / np.maximum(
-                    reference_length, 1.0e-12
-                )
+                normal_valid &= (reference_length[..., 0] > 0.5) & (predicted_length[..., 0] > 0.5)
+                predicted_normalized = predicted_world_normal / np.maximum(predicted_length, 1.0e-12)
+                reference_normalized = normal_world_reference / np.maximum(reference_length, 1.0e-12)
                 dots = np.sum(predicted_normalized * reference_normalized, axis=-1)[normal_valid]
                 if dots.size:
                     normal_dots.append(np.clip(dots[::32], -1.0, 1.0))
@@ -420,7 +406,8 @@ def convert_hypersim_scene(
             normal_output = staging / "normals_camera" / f"{name}.png"
             mask_output = staging / "masks" / f"{name}.png"
             albedo_output = staging / "albedo_gt" / f"{name}.png"
-            save_rgb(image_output, tone_map_hdr(hdr, valid))
+            mapped, ldr_exposure = tone_map_hdr_with_exposure(hdr, valid)
+            save_rgb(image_output, mapped)
             np.save(hdr_output, hdr, allow_pickle=False)
             np.save(depth_output, depth.astype(np.float32), allow_pickle=False)
             save_rgb(normal_output, encode_normal_rgb(normal_camera, valid))
@@ -445,6 +432,8 @@ def convert_hypersim_scene(
                     "h": height,
                     "source_camera": camera_name,
                     "source_frame_index": frame_id,
+                    "ldr_exposure_scale": ldr_exposure,
+                    "ldr_observation": "generated_hypersim_percentile_gamma22",
                 }
             )
             if int(record["local_index"]) % 8 == 7:
@@ -464,6 +453,9 @@ def convert_hypersim_scene(
                 f"normal median dot={normal_dot:.6g}"
             )
 
+        val_filenames, test_filenames, split_metadata = independent_val_test_split(
+            train_filenames, eval_filenames
+        )
         metadata: dict[str, Any] = {
             "camera_model": "OPENCV",
             "w": width,
@@ -479,6 +471,17 @@ def convert_hypersim_scene(
             "aegir_depth_convention": "opencv",
             "aegir_depth_mode": "z",
             "depth_unit_scale_factor": 1.0,
+            "aegir_color": {
+                "format": "aegir-color-v1",
+                "observation_domain": "linear_hdr",
+                "hdr_encoding": "scene_linear_rgb",
+                "target_png": {
+                    "exposure_policy": "fixed_per_frame",
+                    "tone_mapper": "clip",
+                    "transfer_function": "gamma22",
+                    "source": "HyperSim 90th-percentile display mapping",
+                },
+            },
             "normal_space": "camera",
             "normal_camera_convention": "opengl",
             "normal_encoding": "RGB uint8 maps XYZ from [0,255] to [-1,1]",
@@ -490,13 +493,12 @@ def convert_hypersim_scene(
                 "normal_world_median_dot": normal_dot,
             },
             "train_filenames": train_filenames,
-            "val_filenames": eval_filenames,
-            "test_filenames": eval_filenames,
+            "val_filenames": val_filenames,
+            "test_filenames": test_filenames,
+            "aegir_evaluation_split": split_metadata,
             "frames": frames,
         }
-        (staging / "transforms.json").write_text(
-            json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
-        )
+        (staging / "transforms.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
     return {
         "scene": scene_name,

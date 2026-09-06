@@ -1,0 +1,371 @@
+diff --git a/submodules/surfel_tracer/include/gtracer/bvh.h b/submodules/surfel_tracer/include/gtracer/bvh.h
+index ea35810..ab2b1ad 100644
+--- a/submodules/surfel_tracer/include/gtracer/bvh.h
++++ b/submodules/surfel_tracer/include/gtracer/bvh.h
+@@ -25,12 +25,12 @@ public:
+         uint32_t n_elements, const glm::vec3* rays_o, const glm::vec3* rays_d, const int* gs_idxs, 
+         const glm::vec3* means3D, const float* opacity, const glm::vec3* ru, const glm::vec3* rv, const glm::vec3* normals, bool* intersection, cudaStream_t stream) = 0;
+     virtual void gaussian_trace_forward(
+-        uint32_t n_elements, const int S, const glm::vec3* rays_o, const glm::vec3* rays_d, const int* gs_idxs, 
++        uint32_t n_elements, const int S, const glm::vec3* rays_o, const glm::vec3* rays_d, const float* max_distances, const int* gs_idxs,
+         const glm::vec3* means3D, const float* opacity, const glm::vec3* ru, const glm::vec3* rv, const glm::vec3* normals, const float* features, const glm::vec3* shs, 
+         glm::vec3* color, glm::vec3* normal, float* feature, float* depth, float* alpha, 
+         const float alpha_min, const float transmittance_min, const int deg, const int max_coeffs, const bool back_culling, cudaStream_t stream) = 0;
+     virtual void gaussian_trace_backward(
+-        uint32_t n_elements, const int S, const glm::vec3* rays_o, const glm::vec3* rays_d, const int* gs_idxs, 
++        uint32_t n_elements, const int S, const glm::vec3* rays_o, const glm::vec3* rays_d, const float* max_distances, const int* gs_idxs,
+         const glm::vec3* means3D, const float* opacity, const glm::vec3* ru,const glm::vec3* rv, const glm::vec3* normals, const float* features, const glm::vec3* shs, 
+         const glm::vec3* color, const glm::vec3* normal, const float* feature, const float* depth, const float* alpha, 
+         glm::vec3* grad_rays_o, glm::vec3* grad_rays_d, glm::vec3* grad_means3D, float* grad_opacity, glm::vec3* grad_ru, glm::vec3* grad_rv, glm::vec3* grad_normals, float* grad_features, glm::vec3* grad_shs, 
+@@ -43,4 +43,4 @@ public:
+     static std::unique_ptr<TriangleBvhBase> make();
+ };
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/submodules/surfel_tracer/include/surfel_tracer/bvh.h b/submodules/surfel_tracer/include/surfel_tracer/bvh.h
+index 629ba21..2119b8c 100644
+--- a/submodules/surfel_tracer/include/surfel_tracer/bvh.h
++++ b/submodules/surfel_tracer/include/surfel_tracer/bvh.h
+@@ -25,12 +25,12 @@ public:
+         uint32_t n_elements, const glm::vec3* rays_o, const glm::vec3* rays_d, const int* gs_idxs, 
+         const glm::vec3* means3D, const float* opacity, const glm::vec3* ru, const glm::vec3* rv, const glm::vec3* normals, bool* intersection, cudaStream_t stream) = 0;
+     virtual void gaussian_trace_forward(
+-        uint32_t n_elements, const int S, const glm::vec3* rays_o, const glm::vec3* rays_d, const int* gs_idxs, 
++        uint32_t n_elements, const int S, const glm::vec3* rays_o, const glm::vec3* rays_d, const float* max_distances, const int* gs_idxs,
+         const glm::vec3* means3D, const float* opacity, const glm::vec3* ru, const glm::vec3* rv, const glm::vec3* normals, const float* features, const glm::vec3* shs, 
+         glm::vec3* color, glm::vec3* normal, float* feature, float* depth, float* alpha, 
+         const float alpha_min, const float transmittance_min, const int deg, const int max_coeffs, const bool back_culling, cudaStream_t stream) = 0;
+     virtual void gaussian_trace_backward(
+-        uint32_t n_elements, const int S, const glm::vec3* rays_o, const glm::vec3* rays_d, const int* gs_idxs, 
++        uint32_t n_elements, const int S, const glm::vec3* rays_o, const glm::vec3* rays_d, const float* max_distances, const int* gs_idxs,
+         const glm::vec3* means3D, const float* opacity, const glm::vec3* ru,const glm::vec3* rv, const glm::vec3* normals, const float* features, const glm::vec3* shs, 
+         const glm::vec3* color, const glm::vec3* normal, const float* feature, const float* depth, const float* alpha, 
+         glm::vec3* grad_rays_o, glm::vec3* grad_rays_d, glm::vec3* grad_means3D, float* grad_opacity, glm::vec3* grad_ru, glm::vec3* grad_rv, glm::vec3* grad_normals, float* grad_features, glm::vec3* grad_shs, 
+@@ -43,4 +43,4 @@ public:
+     static std::unique_ptr<TriangleBvhBase> make();
+ };
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/submodules/surfel_tracer/src/bindings.cu b/submodules/surfel_tracer/src/bindings.cu
+index 844dcc2..9dd7a6c 100644
+--- a/submodules/surfel_tracer/src/bindings.cu
++++ b/submodules/surfel_tracer/src/bindings.cu
+@@ -40,7 +40,7 @@ public:
+     }
+ 
+     void trace_forward(
+-        const torch::Tensor rays_o, const torch::Tensor rays_d, const torch::Tensor gs_idxs, 
++        const torch::Tensor rays_o, const torch::Tensor rays_d, const torch::Tensor max_distances, const torch::Tensor gs_idxs,
+         const torch::Tensor means3D, const torch::Tensor opacity, const torch::Tensor ru, const torch::Tensor rv, const torch::Tensor normals, const torch::Tensor features, const torch::Tensor shs, 
+         torch::Tensor color, torch::Tensor normal, torch::Tensor feature, torch::Tensor depth, torch::Tensor alpha, 
+         const float alpha_min, const float transmittance_min, const int deg, const bool back_culling
+@@ -52,14 +52,14 @@ public:
+         int S = features.size(1);
+ 
+         triangle_bvh->gaussian_trace_forward(
+-            n_elements, S, (const glm::vec3*)rays_o.data_ptr<float>(), (const glm::vec3*)rays_d.data_ptr<float>(), gs_idxs.data_ptr<int>(), 
++            n_elements, S, (const glm::vec3*)rays_o.data_ptr<float>(), (const glm::vec3*)rays_d.data_ptr<float>(), max_distances.data_ptr<float>(), gs_idxs.data_ptr<int>(),
+             (const glm::vec3*)means3D.data_ptr<float>(), opacity.data_ptr<float>(), (const glm::vec3*)ru.data_ptr<float>(), (const glm::vec3*)rv.data_ptr<float>(), (const glm::vec3*)normals.data_ptr<float>(), features.data_ptr<float>(), (const glm::vec3*)shs.data_ptr<float>(), 
+             (glm::vec3*)color.data_ptr<float>(), (glm::vec3*)normal.data_ptr<float>(), feature.data_ptr<float>(), depth.data_ptr<float>(), alpha.data_ptr<float>(), 
+             alpha_min, transmittance_min, deg, max_coeffs, back_culling, stream);
+     }
+     
+     void intersection_test(
+-        const torch::Tensor rays_o, const torch::Tensor rays_d, const torch::Tensor gs_idxs, 
++        const torch::Tensor rays_o, const torch::Tensor rays_d, const torch::Tensor gs_idxs,
+         const torch::Tensor means3D, const torch::Tensor opacity, const torch::Tensor ru, const torch::Tensor rv, const torch::Tensor normals, torch::Tensor intersection
+         ){
+         const uint32_t n_elements = rays_o.size(0);
+@@ -71,7 +71,7 @@ public:
+     }
+     
+     void trace_backward(
+-        const torch::Tensor rays_o, const torch::Tensor rays_d, const torch::Tensor gs_idxs, 
++        const torch::Tensor rays_o, const torch::Tensor rays_d, const torch::Tensor max_distances, const torch::Tensor gs_idxs,
+         const torch::Tensor means3D, const torch::Tensor opacity, const torch::Tensor ru, const torch::Tensor rv, const torch::Tensor normals, const torch::Tensor features, const torch::Tensor shs, 
+         const torch::Tensor color, const torch::Tensor normal, const torch::Tensor feature, const torch::Tensor depth, const torch::Tensor alpha, 
+         torch::Tensor grad_rays_o, torch::Tensor grad_rays_d, torch::Tensor grad_means3D, torch::Tensor grad_opacity, torch::Tensor grad_ru, torch::Tensor grad_rv, torch::Tensor grad_normals, torch::Tensor grad_features, torch::Tensor grad_shs, 
+@@ -85,7 +85,7 @@ public:
+         int S = features.size(1);
+ 
+         triangle_bvh->gaussian_trace_backward(
+-            n_elements, S, (const glm::vec3*)rays_o.data_ptr<float>(), (const glm::vec3*)rays_d.data_ptr<float>(), gs_idxs.data_ptr<int>(), 
++            n_elements, S, (const glm::vec3*)rays_o.data_ptr<float>(), (const glm::vec3*)rays_d.data_ptr<float>(), max_distances.data_ptr<float>(), gs_idxs.data_ptr<int>(),
+             (const glm::vec3*)means3D.data_ptr<float>(), opacity.data_ptr<float>(), (const glm::vec3*)ru.data_ptr<float>(), (const glm::vec3*)rv.data_ptr<float>(), (const glm::vec3*)normals.data_ptr<float>(), features.data_ptr<float>(), (const glm::vec3*)shs.data_ptr<float>(), 
+             (const glm::vec3*)color.data_ptr<float>(), (const glm::vec3*)normal.data_ptr<float>(), feature.data_ptr<float>(), depth.data_ptr<float>(), alpha.data_ptr<float>(), 
+             (glm::vec3*)grad_rays_o.data_ptr<float>(), (glm::vec3*)grad_rays_d.data_ptr<float>(), (glm::vec3*)grad_means3D.data_ptr<float>(), grad_opacity.data_ptr<float>(), (glm::vec3*)grad_ru.data_ptr<float>(), (glm::vec3*)grad_rv.data_ptr<float>(), (glm::vec3*)grad_normals.data_ptr<float>(), grad_features.data_ptr<float>(), (glm::vec3*)grad_shs.data_ptr<float>(), 
+@@ -113,4 +113,4 @@ py::class_<surfel_tracer::GaussianTracer>(m, "GaussianTracer")
+ 
+ m.def("create_gaussiantracer", &surfel_tracer::create_gaussiantracer);
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/submodules/surfel_tracer/src/bvh.cu b/submodules/surfel_tracer/src/bvh.cu
+index 81f7722..1300efa 100644
+--- a/submodules/surfel_tracer/src/bvh.cu
++++ b/submodules/surfel_tracer/src/bvh.cu
+@@ -191,14 +191,14 @@ public:
+     }
+ 
+     void gaussian_trace_forward(
+-		uint32_t n_elements, const int S, const glm::vec3* rays_o, const glm::vec3* rays_d, const int* gs_idxs, 
++		uint32_t n_elements, const int S, const glm::vec3* rays_o, const glm::vec3* rays_d, const float* max_distances, const int* gs_idxs,
+ 		const glm::vec3* means3D, const float* opacity, const glm::vec3* ru, const glm::vec3* rv, const glm::vec3* normals, const float* features, const glm::vec3* shs, 
+ 		glm::vec3* color, glm::vec3* normal, float* feature, float* depth, float* alpha, 
+ 		const float alpha_min, const float transmittance_min, const int deg, const int max_coeffs, const bool back_culling, cudaStream_t stream
+ 	) override {
+         m_optix.gaussiantrace_forward->invoke(
+ 			{
+-				rays_o, rays_d, gs_idxs, 
++				rays_o, rays_d, max_distances, gs_idxs,
+ 				means3D, opacity, ru, rv, normals, features, shs, 
+ 				color, normal, feature, depth, alpha, 
+ 				alpha_min, transmittance_min, deg, max_coeffs, S, back_culling, m_optix.gas->handle()
+@@ -208,7 +208,7 @@ public:
+     }
+ 
+ 	void gaussian_trace_backward(
+-		uint32_t n_elements, const int S, const glm::vec3* rays_o, const glm::vec3* rays_d, const int* gs_idxs, 
++		uint32_t n_elements, const int S, const glm::vec3* rays_o, const glm::vec3* rays_d, const float* max_distances, const int* gs_idxs,
+ 		const glm::vec3* means3D, const float* opacity, const glm::vec3* ru, const glm::vec3* rv, const glm::vec3* normals, const float* features, const glm::vec3* shs, 
+ 		const glm::vec3* color, const glm::vec3* normal, const float* feature, const float* depth, const float* alpha, 
+ 		glm::vec3* grad_rays_o, glm::vec3* grad_rays_d, glm::vec3* grad_means3D, float* grad_opacity, glm::vec3* grad_ru, glm::vec3* grad_rv, glm::vec3* grad_normals, float* grad_features, glm::vec3* grad_shs, 
+@@ -217,7 +217,7 @@ public:
+ 	) override {
+         m_optix.gaussiantrace_backward->invoke(
+ 			{
+-				rays_o, rays_d, gs_idxs, 
++				rays_o, rays_d, max_distances, gs_idxs,
+ 				means3D, opacity, ru, rv, normals, features, shs, 
+ 				color, normal, feature, depth, alpha, 
+ 				grad_rays_o, grad_rays_d, grad_means3D, grad_opacity, grad_ru, grad_rv, grad_normals, grad_features, grad_shs, 
+@@ -251,4 +251,4 @@ std::unique_ptr<TriangleBvhBase> TriangleBvhBase::make() {
+     return std::unique_ptr<TriangleBvhBase>(new TriangleBvh());
+ }
+ 
+-}
+\ No newline at end of file
++}
+diff --git a/submodules/surfel_tracer/src/optix/gaussiantrace_backward.cu b/submodules/surfel_tracer/src/optix/gaussiantrace_backward.cu
+index fa52434..c0786af 100644
+--- a/submodules/surfel_tracer/src/optix/gaussiantrace_backward.cu
++++ b/submodules/surfel_tracer/src/optix/gaussiantrace_backward.cu
+@@ -15,6 +15,7 @@ extern "C" __global__ void __raygen__rg() {
+ 
+ 	glm::vec3 ray_o = params.ray_origins[idx.x], dL_dray_o = glm::vec3(0.0f, 0.0f, 0.0f);
+ 	glm::vec3 ray_d = params.ray_directions[idx.x], dL_dray_d = glm::vec3(0.0f, 0.0f, 0.0f);
++	const float max_distance = min(params.max_distances[idx.x], T_SCENE_MAX);
+ 	glm::vec3 ray_origin;
+ 
+ 	glm::vec3 C = glm::vec3(0.0f, 0.0f, 0.0f), C_final = params.color[idx.x], grad_color = params.grad_color[idx.x];
+@@ -35,8 +36,9 @@ extern "C" __global__ void __raygen__rg() {
+ 	unsigned int hitArrayPtr0 = (unsigned int)((uintptr_t)(&hitArray) & 0xFFFFFFFF);
+     unsigned int hitArrayPtr1 = (unsigned int)(((uintptr_t)(&hitArray) >> 32) & 0xFFFFFFFF);
+ 
+-	while ((t_start < T_SCENE_MAX) && (T > params.transmittance_min)){
++	while ((t_start < max_distance) && (T > params.transmittance_min)){
+ 		ray_origin = ray_o + t_start * ray_d;
++		const float remaining_distance = max_distance - t_start;
+ 		
+ 		for (int i = 0; i < MAX_BUFFER_SIZE; ++i) {
+ 			hitArray[i].t = 1e16f;
+@@ -47,7 +49,7 @@ extern "C" __global__ void __raygen__rg() {
+ 			make_float3(ray_origin.x, ray_origin.y, ray_origin.z),
+ 			make_float3(ray_d.x, ray_d.y, ray_d.z),
+ 			0.0f,                // Min intersection distance
+-			T_SCENE_MAX,               // Max intersection distance
++			remaining_distance,         // Stop at this ray's sampled emitter endpoint
+ 			0.0f,                // rayTime -- used for motion blur
+ 			OptixVisibilityMask(255), // Specify always visible
+ 			OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+@@ -62,7 +64,7 @@ extern "C" __global__ void __raygen__rg() {
+ 			int primIdx = hitArray[i].primIdx;
+ 
+ 			if (primIdx == -1) {
+-				t_curr = T_SCENE_MAX;
++				t_curr = remaining_distance;
+ 				break;
+ 			}
+ 			else{
+@@ -86,6 +88,7 @@ extern "C" __global__ void __raygen__rg() {
+ 				float o_g = glm::dot(n, ray_o_mean3D);
+ 				float d_g = glm::dot(n, ray_d);
+ 				float d = -o_g * d_g / max(1e-6f, d_g * d_g);
++				if (d >= max_distance) continue;
+ 
+ 				glm::vec3 pos = ray_o + d * ray_d - mean3D;
+ 				glm::vec2 p_g = {glm::dot(ru, pos), glm::dot(rv, pos)}; 
+diff --git a/submodules/surfel_tracer/src/optix/gaussiantrace_backward.h b/submodules/surfel_tracer/src/optix/gaussiantrace_backward.h
+index 55e6201..662047b 100644
+--- a/submodules/surfel_tracer/src/optix/gaussiantrace_backward.h
++++ b/submodules/surfel_tracer/src/optix/gaussiantrace_backward.h
+@@ -9,6 +9,7 @@ struct Gaussiantrace_backward {
+ 	struct Params {
+ 		const glm::vec3* ray_origins;
+ 		const glm::vec3* ray_directions;
++		const float* max_distances;
+ 		const int* gs_idxs;
+ 		const glm::vec3* means3D;
+ 		const float* opacity;
+diff --git a/submodules/surfel_tracer/src/optix/gaussiantrace_forward.cu b/submodules/surfel_tracer/src/optix/gaussiantrace_forward.cu
+index 43f9eb0..6308ee4 100644
+--- a/submodules/surfel_tracer/src/optix/gaussiantrace_forward.cu
++++ b/submodules/surfel_tracer/src/optix/gaussiantrace_forward.cu
+@@ -14,6 +14,7 @@ extern "C" __global__ void __raygen__rg() {
+ 
+ 	glm::vec3 ray_o = params.ray_origins[idx.x];
+ 	glm::vec3 ray_d = params.ray_directions[idx.x];
++	const float max_distance = min(params.max_distances[idx.x], T_SCENE_MAX);
+ 	glm::vec3 ray_origin;
+ 
+ 	glm::vec3 C = glm::vec3(0.0f, 0.0f, 0.0f), N = glm::vec3(0.0f, 0.0f, 0.0f);
+@@ -24,8 +25,9 @@ extern "C" __global__ void __raygen__rg() {
+ 	unsigned int hitArrayPtr0 = (unsigned int)((uintptr_t)(&hitArray) & 0xFFFFFFFF);
+     unsigned int hitArrayPtr1 = (unsigned int)(((uintptr_t)(&hitArray) >> 32) & 0xFFFFFFFF);
+ 
+-	while ((t_start < T_SCENE_MAX) && (T > params.transmittance_min)){
++	while ((t_start < max_distance) && (T > params.transmittance_min)){
+ 		ray_origin = ray_o + t_start * ray_d;
++		const float remaining_distance = max_distance - t_start;
+ 		
+ 		for (int i = 0; i < MAX_BUFFER_SIZE; ++i) {
+ 			hitArray[i].t = 1e16f;
+@@ -36,7 +38,7 @@ extern "C" __global__ void __raygen__rg() {
+ 			make_float3(ray_origin.x, ray_origin.y, ray_origin.z),
+ 			make_float3(ray_d.x, ray_d.y, ray_d.z),
+ 			FLT_EPSILON,                // Min intersection distance
+-			T_SCENE_MAX,               // Max intersection distance
++			remaining_distance,         // Stop at this ray's sampled emitter endpoint
+ 			0.0f,                // rayTime -- used for motion blur
+ 			OptixVisibilityMask(255), // Specify always visible
+ 			OPTIX_RAY_FLAG_CULL_BACK_FACING_TRIANGLES,
+@@ -51,7 +53,7 @@ extern "C" __global__ void __raygen__rg() {
+ 			int primIdx = hitArray[i].primIdx;
+ 
+ 			if (primIdx == -1) {
+-				t_curr = T_SCENE_MAX;
++				t_curr = remaining_distance;
+ 				break;
+ 			}
+ 			else{
+@@ -72,6 +74,7 @@ extern "C" __global__ void __raygen__rg() {
+ 				float o_g = glm::dot(n, (ray_o - mean3D));
+ 				float d_g = glm::dot(n, ray_d);
+ 				float d = -o_g * d_g / max(1e-6f, d_g * d_g);
++				if (d >= max_distance) continue;
+ 				glm::vec3 pos = ray_o + d * ray_d - mean3D;
+ 				glm::vec2 p_g = {glm::dot(ru, pos), glm::dot(rv, pos)}; 
+ 				float alpha = min(0.99, o * __expf(-0.5f * glm::dot(p_g, p_g)));
+diff --git a/submodules/surfel_tracer/src/optix/gaussiantrace_forward.h b/submodules/surfel_tracer/src/optix/gaussiantrace_forward.h
+index a166af8..d9f8873 100644
+--- a/submodules/surfel_tracer/src/optix/gaussiantrace_forward.h
++++ b/submodules/surfel_tracer/src/optix/gaussiantrace_forward.h
+@@ -9,6 +9,7 @@ struct Gaussiantrace_forward {
+ 	struct Params {
+ 		const glm::vec3* ray_origins;
+ 		const glm::vec3* ray_directions;
++		const float* max_distances;
+ 		const int* gs_idxs;
+ 		const glm::vec3* means3D;
+ 		const float* opacity;
+diff --git a/submodules/surfel_tracer/surfel_tracer/raytracer.py b/submodules/surfel_tracer/surfel_tracer/raytracer.py
+index e5ca73c..ce4e864 100644
+--- a/submodules/surfel_tracer/surfel_tracer/raytracer.py
++++ b/submodules/surfel_tracer/surfel_tracer/raytracer.py
+@@ -4,14 +4,14 @@ from surfel_tracer import _C
+ 
+ class _GaussianTrace(torch.autograd.Function):
+     @staticmethod
+-    def forward(ctx, bvh, rays_o, rays_d, gs_idxs, means3D, opacity, ru, rv, normals, features, shs, alpha_min, transmittance_min, deg, back_culling):    
++    def forward(ctx, bvh, rays_o, rays_d, max_distances, gs_idxs, means3D, opacity, ru, rv, normals, features, shs, alpha_min, transmittance_min, deg, back_culling):
+         color = torch.zeros_like(rays_o)
+         normal = torch.zeros_like(rays_o)
+         feature = torch.zeros(*rays_o.shape[:-1], features.shape[-1], device=rays_o.device, dtype=rays_o.dtype)
+         depth = torch.zeros_like(rays_o[:, 0])
+         alpha = torch.zeros_like(rays_o[:, 0])
+         bvh.trace_forward(
+-            rays_o, rays_d, gs_idxs, means3D, opacity, ru, rv, normals, features, shs, 
++            rays_o, rays_d, max_distances, gs_idxs, means3D, opacity, ru, rv, normals, features, shs,
+             color, normal, feature, depth, alpha, 
+             alpha_min, transmittance_min, deg, back_culling
+         )
+@@ -21,12 +21,12 @@ class _GaussianTrace(torch.autograd.Function):
+         ctx.deg = deg
+         ctx.bvh = bvh
+         ctx.back_culling = back_culling
+-        ctx.save_for_backward(rays_o, rays_d, gs_idxs, means3D, opacity, ru, rv, normals, features, shs, color, normal, feature, depth, alpha)
++        ctx.save_for_backward(rays_o, rays_d, max_distances, gs_idxs, means3D, opacity, ru, rv, normals, features, shs, color, normal, feature, depth, alpha)
+         return color, normal, feature, depth, alpha
+ 
+     @staticmethod
+     def backward(ctx, grad_out_color, grad_out_normal, grad_out_feature, grad_out_depth, grad_out_alpha):
+-        rays_o, rays_d, gs_idxs, means3D, opacity, ru, rv, normals, features, shs, color, normal, feature, depth, alpha = ctx.saved_tensors
++        rays_o, rays_d, max_distances, gs_idxs, means3D, opacity, ru, rv, normals, features, shs, color, normal, feature, depth, alpha = ctx.saved_tensors
+         grad_rays_o = torch.zeros_like(rays_o)
+         grad_rays_d = torch.zeros_like(rays_d)
+         grad_means3D = torch.zeros_like(means3D)
+@@ -38,7 +38,7 @@ class _GaussianTrace(torch.autograd.Function):
+         grad_shs = torch.zeros_like(shs)
+         
+         ctx.bvh.trace_backward(
+-            rays_o, rays_d, gs_idxs, means3D, opacity, ru, rv, normals, features, shs, 
++            rays_o, rays_d, max_distances, gs_idxs, means3D, opacity, ru, rv, normals, features, shs,
+             color, normal, feature, depth, alpha, 
+             grad_rays_o, grad_rays_d, grad_means3D, grad_opacity, grad_ru, grad_rv, grad_normals, grad_features, grad_shs,
+             grad_out_color, grad_out_normal, grad_out_feature, grad_out_depth, grad_out_alpha,
+@@ -50,6 +50,7 @@ class _GaussianTrace(torch.autograd.Function):
+             grad_rays_o,
+             grad_rays_d,
+             None,
++            None,
+             grad_means3D,
+             grad_opacity,
+             grad_ru,
+@@ -81,7 +82,7 @@ class GaussianTracer():
+         self.gs_idxs = gs_idxs.int()
+         self.impl.update_bvh(vertices_b[faces_b])
+ 
+-    def trace(self, rays_o, rays_d, means3D, opacity, ru, rv, normals, features, shs, alpha_min, deg=3, back_culling=False):
++    def trace(self, rays_o, rays_d, means3D, opacity, ru, rv, normals, features, shs, alpha_min, deg=3, back_culling=False, max_distances=None):
+         rays_o = rays_o.contiguous()
+         rays_d = rays_d.contiguous()
+         means3D = means3D.contiguous()
+@@ -96,6 +97,15 @@ class GaussianTracer():
+         shs = shs.contiguous()
+ 
+         prefix = rays_o.shape[:-1]
++        if max_distances is None:
++            max_distances = torch.full(prefix, 100.0, dtype=rays_o.dtype, device=rays_o.device)
++        elif max_distances.shape == prefix + (1,):
++            max_distances = max_distances[..., 0]
++        elif max_distances.shape != prefix:
++            raise ValueError(
++                f"max_distances must have shape {prefix} or {prefix + (1,)}, got {tuple(max_distances.shape)}"
++            )
++        max_distances = max_distances.to(device=rays_o.device, dtype=rays_o.dtype).contiguous().view(-1)
+         rays_o = rays_o.view(-1, 3)
+         rays_d = rays_d.view(-1, 3)
+ 
+@@ -110,8 +120,9 @@ class GaussianTracer():
+         
+         rays_o_ = rays_o[mask]
+         rays_d_ = rays_d[mask]
++        max_distances_ = max_distances[mask]
+         if not rays_o_.shape[0] == 0:
+-            color[mask], normal[mask], feature[mask], depth[mask], alpha[mask] = _GaussianTrace.apply(self.impl, rays_o_, rays_d_, self.gs_idxs, means3D, opacity, ru, rv, normals, features, shs, alpha_min, self.transmittance_min, deg, back_culling)
++            color[mask], normal[mask], feature[mask], depth[mask], alpha[mask] = _GaussianTrace.apply(self.impl, rays_o_, rays_d_, max_distances_, self.gs_idxs, means3D, opacity, ru, rv, normals, features, shs, alpha_min, self.transmittance_min, deg, back_culling)
+ 
+         color = color.view(*prefix, 3)
+         normal = normal.view(*prefix, 3)
+@@ -119,4 +130,4 @@ class GaussianTracer():
+         depth = depth.view(*prefix)
+         alpha = alpha.view(*prefix)
+         
+-        return color, normal, feature, depth, alpha
+\ No newline at end of file
++        return color, normal, feature, depth, alpha

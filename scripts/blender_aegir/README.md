@@ -1,0 +1,64 @@
+# AEGIR Blender capture
+
+Use Blender 5.2.0 LTS locally and on the server. Edit in Solid or Material Preview mode;
+the server performs the final Cycles/OptiX render without a display.
+
+The checked-in template contains 120 train, 20 validation, and 40 held-out test
+cameras. Camera objects are cheap; they do not load all rendered frames into VRAM.
+
+## Scene contract
+
+- Metric units (`1 Blender unit = 1 meter`).
+- Train cameras in `AEGIR_TrainCameras`.
+- Validation cameras in `AEGIR_ValCameras`.
+- Held-out cameras in `AEGIR_TestCameras`.
+- Visible emissive meshes or Blender lights in `AEGIR_Emitters`.
+- Every emitter has a unique positive integer custom property named `aegir_emitter_id`.
+- Mesh emitters use a unique node material containing a Principled BSDF.
+- Camera pixel aspect is 1 and lens shift is 0.
+- Disable camera depth of field and scene motion blur for geometric ground truth.
+
+The lighting JSON maps a condition name to every emitter object name. Mesh values are
+Principled emission strengths; Blender Light values are their energies.
+
+## Create and test the template
+
+```bash
+BLENDER=/workspace/hohyun_ws/tools/blender/blender
+ROOT=/workspace/hohyun_ws/AEGIR
+
+"$BLENDER" -b \
+  --python-exit-code 1 \
+  --python "$ROOT/scripts/blender_aegir/create_template.py" \
+  -- \
+  --output "$ROOT/assets/blender/aegir_room_template.blend"
+
+bash "$ROOT/scripts/blender_aegir/run_server_render.sh" \
+  "$ROOT/assets/blender/aegir_room_template.blend" \
+  "$ROOT/assets/blender/aegir_room_template_lighting.json" \
+  "/workspace/hohyun_ws/datasets/aegir_nerfstudio/blender_room_train" \
+  train 256 512
+
+python "$ROOT/scripts/blender_aegir/validate_dataset.py" \
+  --data "/workspace/hohyun_ws/datasets/aegir_nerfstudio/blender_room_train"
+```
+
+For a quick server preflight, select only two train cameras without editing the scene:
+
+```bash
+SPLITS=train MAX_FRAMES=2 \
+bash "$ROOT/scripts/blender_aegir/run_server_render.sh" \
+  room.blend room_lighting.json /tmp/aegir_room_smoke train 4 64
+```
+
+For relighting ground truth, render only held-out cameras into a separate directory:
+
+```bash
+SPLITS=test \
+bash "$ROOT/scripts/blender_aegir/run_server_render.sh" \
+  room.blend room_lighting.json /data/room_ceiling_only ceiling_only 256 512
+```
+
+The output already follows the AEGIR Nerfstudio/HDR contract and includes deterministic
+display PNGs, linear radiance NPY/EXR, metric z-depth, world normals, material AOVs,
+masks, emitter masks, object IDs, camera splits, and emitter metadata.

@@ -9,14 +9,15 @@
 
 ## 가장 중요한 정정
 
-논문의 iteration당 ray 수는 **2^16 = 65,536 rays**가 맞다.
+논문의 iteration당 총 transport ray 수는 **2^16 = 65,536 rays**가 맞다.
 
 PDF 텍스트 추출 과정에서 위첨자 `16`이 본문 숫자 `2`에 붙어 `216`처럼
 추출되었고, 이를 216 rays로 잘못 해석했던 이전 검토 내용은 폐기한다.
 
-현재 구현의 `rays_per_step=1,024`는 논문의 65,536 rays보다 64배 적다.
-논문 설정을 재현할 때는 메모리와 실행 시간을 확인하면서 최종적으로
-65,536 rays/iteration을 기준으로 맞춰야 한다.
+중요하게도 이 값은 primary pixel 수가 아니다. 논문의 point당
+`N_brdf=128`, `N_light=128` 설정을 함께 적용하면 primary surface point는
+`65,536 / (128 + 128) = 256`개다. 로컬 옵션 `rays_per_step`은 역사적인 이름과
+달리 primary surface point 수를 뜻하므로 기본값을 256으로 설정한다.
 
 ## 결론
 
@@ -160,19 +161,18 @@ dataset mask와 rasterized valid mask를 결합해야 한다. TV에서는 invali
 - inference 시 SH proxy를 끄고 secondary hit에서 recovered explicit emitter까지
   다시 trace한다.
 
-현재 구현:
+**2026-08-14 구현 완료.** 현재 구현:
 
-- 전체 surfel이 아니라 균등하게 고른 1,024개 Gaussian center만 사용
-- center를 작은 sphere처럼 근사하여 point-distance hit 검사
-- full SH가 아니라 DN의 DC 색상만 보존
-- secondary tracing에 IRGS를 사용하지 않음
-- 별도의 4개 cosine sample을 direct term과 무관하게 더함
-- 임의의 `bounce_strength=0.25` 사용
-- inspect와 novel-view inference에서도 계속 SH/DC proxy 사용
+- DN의 frozen DC+rest full SH 16계수를 checkpoint에 보존
+- training은 direct shadow와 동일한 IRGS trace의 opacity-composited SH color를 재사용
+- 각 primary transport sample에서 `V*L_direct + (1-V)*L_bounce`로 결합
+- inference는 SH를 요청하지 않고 first Gaussian hit의 material/normal에서 diffuse
+  sampling 후 recovered explicit emitter까지 다시 trace; miss는 0
+- 기존 1,024 center/sphere proxy와 `bounce_strength=0.25` 제거
+- v5 checkpoint와 training/inference 분리 회귀 및 CUDA gradient test 통과
 
-학습용 SH proxy transport와 최종 emitter-based inference transport를 별도 경로로
-구현해야 한다. 논문의 visibility-weighted incident-light 식과 현재 독립적인
-`direct + indirect` 합산 방식도 다시 대조한다.
+논문이 inference secondary sample count를 별도 숫자로 명시하지 않아 기본 1개로
+설정했으며, 이는 inference variance-control option으로만 유지한다.
 
 ### 7. DiffusionRenderer glue pipeline 복원/재구현
 
@@ -202,79 +202,93 @@ DiffusionRenderer의 depth/normal 출력은 AEGIR supervision에 사용하지 �
 
 ## P1: 논문 재현성과 학습 품질을 위해 수정
 
-### 8. ray budget
+### 8. [완료] ray budget
 
-- 논문: 2^16 = 65,536 rays/iteration
-- 현재 기본값 및 CLI/run script: 1,024 rays/iteration
-- 현재는 논문보다 64배 적음
+- 논문: 2^16 = 65,536 total transport rays/iteration
+- BRDF 128 + emitter 128 = primary point당 transport ray 256개
+- 따라서 primary surface point는 iteration당 256개
+- 현재 기본 config, CLI 및 production run script를 256 primary point로 통일
 
-BRDF sample 128개와 emitter sample 128개가 primary ray마다 평가되는 구조이므로,
-65,536 설정의 실제 VRAM/시간을 먼저 작은 smoke run으로 측정해야 한다. OOM을
-피하기 위한 chunked ray evaluation을 구현하되, 논문과 동일한 총 ray 수와 loss
-정규화를 유지한다.
+로컬 `--rays-per-step`은 primary surface point 수를 받는 과거 이름이다. 따라서
+논문 설정은 `--rays-per-step 256 --num-brdf-samples 128 --num-light-samples 128`이다.
+65,536을 이 옵션에 직접 넣으면 `65,536 x 256 = 16,777,216` transport rays가 되어
+논문 budget의 256배가 된다. 2026-08-14 bedroom stress test에서 이 잘못된 대형
+설정은 24,000 MiB PyTorch cap 아래 약 15.4초/iteration, 20k ETA 약 85.6시간이었다.
 
 ### 9. 색공간과 tone mapping
 
-현재 renderer는 linear HDR에 Reinhard tone mapping만 적용한다. target은 PNG를
-단순히 `[0,1]`로 읽으며 sRGB/linear 변환을 하지 않는다. HyperSim converter는
-frame마다 90-percentile exposure와 gamma를 적용한다.
+**2026-08-13 구현 완료.** 완전한 HDR frame이 있는 scene은 PNG를 학습 target으로 쓰지
+않고 scene-linear HDR을 symmetric `log1p` domain에서 비교한다. LDR-only scene은
+`aegir_color-v1` metadata의 exposure/tone mapper/transfer function을 그대로 사용하며,
+정보가 없을 때만 learned scene exposure + Reinhard+sRGB fallback을 명시적으로 쓴다.
+train/eval이 같은 변환 함수를 사용하고 policy와 learned exposure를 checkpoint에 저장한다.
 
-확인할 사항:
-
-- target RGB가 sRGB인지 linear LDR인지 명시
-- rendered linear HDR에 동일한 camera response/tone mapping 적용
-- 필요하면 per-view exposure를 metadata로 보존하거나 최적화
-- DiffusionRenderer basecolor prior의 sRGB/linear convention 확인
-- BRDF에서 쓰는 albedo는 linear reflectance로 통일
+DiffusionRenderer basecolor PNG는 기본 sRGB source로 명시하여 importer에서 한 번 linear
+reflectance로 decode하고, BRDF/material-prior loss는 linear albedo만 받는다. 기존 30개
+converted scene에도 관측 domain metadata를 기록했다. raw linear HDR/metric tensor와
+visualization PNG를 분리했으며 sRGB 왕복, exact/fallback LDR, HDR loss, converter/importer
+회귀를 포함한 전체 CPU test `68 passed`를 확인했다.
 
 ### 10. focus map과 patch 경계
 
-현재 focus map은 전체 target image가 아니라 선택된 patch 안에서 계산된다. patch
-경계의 zero padding이 인공적인 contrast를 만들고 `max(delta)`도 patch마다 달라진다.
-전체 view에서 focus map을 계산한 뒤 동일 patch를 crop하거나, 논문 구현과 동일한
-sampling/normalization을 사용해야 한다.
+**2026-08-13 구현 완료.** 전체 target view와 combined valid mask에서 7x7 local
+contrast 및 view-global `max(delta)` normalization을 먼저 계산하고, target/G-buffer와
+동일한 patch 좌표로 focus weight를 crop한다. 따라서 동일 source pixel의 weight는 patch
+위치와 크기에 영향받지 않는다. invalid RGB는 local average와 normalization에서 제외되며
+최종 masked L1에서도 제외된다. 서로 다른 두 crop의 겹치는 픽셀 일치, invalid 값 변경
+불변성, precomputed crop의 photometric loss 적용 회귀 테스트를 추가했다.
 
 ### 11. 논문 외 emitter regularizer
 
-현재 기본값에는 논문에 없는 다음 항목이 추가되어 있다.
+수정 전 기본값에는 논문에 없는 다음 항목이 추가되어 있었다.
 
 - surface proximity: weight 10.0
 - camera-frustum constraint: weight 1.0
 
-논문의 기본 `area + white + bounds` 결과와 직접 비교하려면 이 둘은 기본 off로
-두고 별도 ablation으로 평가한다. area/bounds loss의 scene-scale normalization도
+2026-08-13에 둘의 기본 가중치를 `0.0`으로 변경했다. 계산 기능은 삭제하지 않았으며,
+emitter가 표면에서 과도하게 뜨거나 모든 관측 frustum 밖으로 이탈하는 경우에만
+`--light-surface`와 `--light-view`로 명시적으로 다시 활성화한다. 논문의 기본
+`area + white + bounds` 항은 유지한다. area/bounds loss의 scene-scale normalization도
 논문 수식과 현재 비정규화 좌표계의 차이를 명시한다.
 
 ### 12. emitter adaptation optimizer state
 
-split/prune 후 현재 코드는 emitter Adam optimizer 전체를 새로 만든다. 살아남은
-emitter의 momentum도 손실된다. 문서에는 momentum을 보존한다고 적혀 있어 코드와
-문서가 불일치한다. unchanged emitter state를 매핑해 보존하거나 해당 차이를
-명시해야 한다.
+**2026-08-13 구현 완료.** split/prune 결과가 새 행의 old-emitter provenance와 child
+여부를 반환한다. unsplit survivor의 raw parameter와 Adam first/second moment를 행 단위로
+정확히 보존하고, split child의 moment는 0으로 초기화한다. Adam의 `step`은 parameter
+tensor당 하나인 scalar이므로 survivor 값을 보존하고 child와 공유한다. prune/split 및
+adaptation 직후 finite optimizer step 회귀 테스트를 추가했다.
 
 ### 13. resume와 reproducibility
 
-현재 AEGIR checkpoint에는 model과 loss history만 있고 다음 상태가 없다.
+**2026-08-13 구현 완료.** trainer checkpoint를 v4로 올리고 geometry/material/emitter
+Adam state, 다음 global step, Python/NumPy/CPU/CUDA RNG, 고정 scene bounds와 surface
+anchor, 선택 frame identity, emitter adaptation state를 저장한다. `--resume`은 저장된
+global step부터 시작하므로 learning-rate/adaptation schedule을 반복하지 않는다. 저장된
+config가 기준이며 `--steps`만 최종 목표 step으로 변경한다.
 
-- geometry/material/emitter optimizer state
-- 현재 iteration을 기준으로 한 resume entrypoint
-- CPU/CUDA RNG state
-- data/patch sampler state
-
-SSH/tmux 장애 후 exact resume가 불가능하다. 20k 학습 전에 resume 기능과 고정 seed를
-추가한다.
+정확한 재개를 위해 DN checkpoint, dataset/prior 경로, frame 목록, visible CUDA device
+수가 달라지면 오류로 중단한다. 현재 full-SH schema는 v5이며 v1-v4는
+inspection/inference 또는 명시적 warm start만
+허용하고 exact resume에서는 거부한다. Python·NumPy·PyTorch 난수와 세 optimizer를
+사용하고 중간 emitter split까지 포함한 7-step 연속 실행 대 4+3-step resume 결과가
+tensor 단위로 일치했으며 CUDA RNG round-trip도 통과했다.
 
 ### 14. evaluation
 
-현재 `inspect`는 전체 dataset에 대해 PSNR만 계산하며 mask/split을 사용하지 않는다.
-논문 비교를 위해 다음이 필요하다.
+**2026-08-13 부분 구현.** 현재 `inspect`는 선택한 split에서 동일 invalid mask를 적용한
+PSNR, SSIM, spatial LPIPS를 계산한다. 평가 seed와 sample 수를 metadata에 저장하고,
+float32 raw RGB/linear HDR 입력은 PNG와 별도 보존한다. train/evaluation split overlap은
+오류로 차단하며 split provenance도 결과에 기록한다. 2026-08-13에
+FIPT-Synthetic/HyperSim/Isaac의 기존 train을 보존한 채 공동 held-out pool을 원본
+순서에서 교대로 배정하여 독립 val/test로 분할했다. 기본·파생 26개 metadata와
+converter를 동기화하고 교집합 0, 전체 frame 완전 분할 및 idempotency를 검증했다.
 
-- held-out test views only
-- invalid mask 적용
-- PSNR, SSIM, LPIPS
-- raw Monte Carlo output metric과 visualization-only denoised output 분리
+최종 논문 비교를 위해 다음은 아직 필요하다.
+
+- FIPT-Real held-out metadata 추가
 - inference에서는 SH proxy를 완전히 비활성화
-- 충분한 render sample 수와 재현 가능한 sampling seed
+- 색공간 규약 확정 후 동일 checkpoint CUDA 재평가의 수치 동등성 검증
 
 ## 현재 테스트 상태와 필요한 회귀 테스트
 
@@ -292,8 +306,8 @@ SSH/tmux 장애 후 exact resume가 불가능하다. 20k 학습 전에 resume �
 - [완료] ambient 표현 자체가 없고 legacy ambient가 무시되는지 검증
 - training SH bounce와 inference emitter bounce 분기
 - scene scale 변화에 대한 visibility 동등성
-- 65,536-ray chunked evaluation과 unchunked reference의 수치 동등성
-- checkpoint exact resume 동등성
+- [완료] 기본 설정의 `256 x (128 + 128) = 65,536` transport-ray budget 검증
+- [완료] checkpoint exact resume 동등성
 - held-out masked metrics
 
 ## 수정 권장 순서
@@ -302,11 +316,11 @@ SSH/tmux 장애 후 exact resume가 불가능하다. 20k 학습 전에 resume �
 2. [완료] 회전 emitter intersection 및 회귀 테스트
 3. global ambient 제거
 4. scene normalization/visibility threshold 정합
-5. secondary bounce 학습·추론 경로 구현
+5. [완료] secondary bounce 학습·추론 경로 구현
 6. [완료] DiffusionRenderer input/prior/import pipeline 구현 및 bedroom 222-frame 검증
-7. 2^16 ray를 위한 chunked transport와 논문 hyperparameter 적용
-8. 색공간/tone mapping 정합
-9. exact resume와 평가 pipeline 구현
+7. [완료] `256 x (128 + 128) = 2^16` transport-ray budget 적용
+8. [완료] 색공간/tone mapping 정합
+9. [완료] exact resume 구현; evaluation protocol 마무리
 10. 전체 CUDA/OptiX smoke test 후 AEGIR 20k 학습
 
 ## 작업 원칙

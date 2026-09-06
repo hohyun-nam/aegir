@@ -3,14 +3,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from pathlib import Path
 import shutil
 import tempfile
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 from PIL import Image
-
 
 OPENCV_TO_OPENGL = np.diag([1.0, -1.0, -1.0])
 
@@ -44,9 +43,7 @@ def _orthonormalize(rotation: np.ndarray) -> np.ndarray:
 def _validate_camera_files(rt: np.ndarray, intrinsics: np.ndarray, cam: np.ndarray) -> np.ndarray:
     count = len(rt)
     if len(intrinsics) != count or len(cam) != count:
-        raise ValueError(
-            f"camera count mismatch: Rt={count}, K_list={len(intrinsics)}, cam={len(cam)}"
-        )
+        raise ValueError(f"camera count mismatch: Rt={count}, K_list={len(intrinsics)}, cam={len(cam)}")
     if not np.allclose(rt[:, 3], np.array([0.0, 0.0, 0.0, 1.0]), atol=1.0e-6):
         raise ValueError("Rt.txt matrices must have a homogeneous [0, 0, 0, 1] row")
     if not np.allclose(intrinsics[:, 2], np.array([0.0, 0.0, 1.0]), atol=1.0e-6):
@@ -113,12 +110,10 @@ def _geometry_normal_score(
     scores: list[np.ndarray] = []
     for index in frame_indices:
         stem = f"{index:03d}_0001"
-        depth = np.load(scene_dir / "MiDepth" / f"{stem}.npy", allow_pickle=False).astype(
+        depth = np.load(scene_dir / "MiDepth" / f"{stem}.npy", allow_pickle=False).astype(np.float64)
+        normal = np.asarray(Image.open(scene_dir / "MiNormalGlobal" / f"{stem}.png"))[..., :3].astype(
             np.float64
         )
-        normal = np.asarray(Image.open(scene_dir / "MiNormalGlobal" / f"{stem}.png"))[
-            ..., :3
-        ].astype(np.float64)
         normal = normal / 127.5 - 1.0
         mask = np.asarray(Image.open(scene_dir / "ImMask" / f"{stem}.png"))
         if mask.ndim == 3:
@@ -166,8 +161,7 @@ def validate_source_geometry(
     ray_score = _geometry_normal_score(scene_dir, rotations, intrinsics, frame_indices, "ray")
     if z_score < 0.9:
         raise ValueError(
-            "Rt/depth/world-normal projection validation failed: "
-            f"median z-depth normal dot={z_score:.6f}"
+            f"Rt/depth/world-normal projection validation failed: median z-depth normal dot={z_score:.6f}"
         )
     return {"z_depth_normal_dot": z_score, "ray_depth_normal_dot": ray_score}
 
@@ -250,9 +244,7 @@ def convert_fipt_real_scene(
         geometry_metrics = validate_source_geometry(scene_dir, rotations, intrinsics)
 
     output_dir.parent.mkdir(parents=True, exist_ok=True)
-    staging_dir = Path(
-        tempfile.mkdtemp(prefix=f".{output_dir.name}.tmp-", dir=str(output_dir.parent))
-    )
+    staging_dir = Path(tempfile.mkdtemp(prefix=f".{output_dir.name}.tmp-", dir=str(output_dir.parent)))
     try:
         for name in ("images", "radiance_hdr", "depths", "normals_world", "masks"):
             (staging_dir / name).mkdir()
@@ -275,14 +267,10 @@ def convert_fipt_real_scene(
                     raise ValueError(f"image size mismatch in {source['image']}: {image.size}")
             with Image.open(source["normal"]) as normal_image:
                 if normal_image.size != (width, height):
-                    raise ValueError(
-                        f"normal/image size mismatch in {source['normal']}: {normal_image.size}"
-                    )
+                    raise ValueError(f"normal/image size mismatch in {source['normal']}: {normal_image.size}")
             with Image.open(source["mask"]) as mask_image:
                 if mask_image.size != (width, height):
-                    raise ValueError(
-                        f"mask/image size mismatch in {source['mask']}: {mask_image.size}"
-                    )
+                    raise ValueError(f"mask/image size mismatch in {source['mask']}: {mask_image.size}")
             shutil.copy2(source["image"], image_path)
             shutil.copy2(source["normal"], normal_path)
             shutil.copy2(source["mask"], mask_path)
@@ -341,6 +329,12 @@ def convert_fipt_real_scene(
             "aegir_depth_convention": "opencv",
             "aegir_depth_mode": "z",
             "depth_unit_scale_factor": 1.0,
+            "aegir_color": {
+                "format": "aegir-color-v1",
+                "observation_domain": "linear_hdr",
+                "hdr_encoding": "scene_linear_rgb",
+                "target_png": {"source": "FIPT-Real source PNG camera response unknown"},
+            },
             "normal_space": "world",
             "normal_world_encoding": "RGB uint8 maps XYZ from [0,255] to [-1,1]",
             "source_scene": str(scene_dir),
@@ -348,9 +342,7 @@ def convert_fipt_real_scene(
             "geometry_validation": geometry_metrics,
             "frames": frames,
         }
-        (staging_dir / "transforms.json").write_text(
-            json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
-        )
+        (staging_dir / "transforms.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
         _validate_export(staging_dir, frame_count)
 
         if output_dir.exists():

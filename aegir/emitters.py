@@ -14,6 +14,7 @@ class EmitterState:
     quaternions: Tensor
     scales: Tensor
     colors: Tensor
+    axis_gains: Tensor
     spreads: Tensor
     falloff_powers: Tensor
 
@@ -29,6 +30,7 @@ class AreaEmitterModel(nn.Module):
         quaternions: Tensor | None = None,
         spreads: Tensor | None = None,
         falloff_powers: Tensor | None = None,
+        axis_gains: Tensor | None = None,
         min_scale: float = 1.0e-4,
         min_spread: float = 1.0e-3,
         max_scale: float = 1.0e3,
@@ -47,6 +49,10 @@ class AreaEmitterModel(nn.Module):
             quaternions[:, 0] = 1.0
         if colors is None:
             colors = torch.ones((n, 3), device=device, dtype=dtype)
+        if axis_gains is None:
+            axis_gains = torch.ones((n, 6), device=device, dtype=dtype)
+        if axis_gains.shape != (n, 6):
+            raise ValueError("axis_gains must have shape [num_emitters, 6]")
         if spreads is None:
             spreads = torch.ones((n, 3), device=device, dtype=dtype)
         if falloff_powers is None:
@@ -61,6 +67,10 @@ class AreaEmitterModel(nn.Module):
         self.raw_quaternions = nn.Parameter(quaternions.clone())
         self.log_scales = nn.Parameter(scales.clamp_min(min_scale).log())
         self.log_colors = nn.Parameter(colors.clamp_min(1.0e-6).log())
+        # Order: +X, -X, +Y, -Y, +Z, -Z in the emitter's local frame.
+        # The physical property below normalizes their arithmetic mean to one,
+        # leaving common RGB responsible for overall intensity and chromaticity.
+        self.log_axis_gains = nn.Parameter(axis_gains.clamp_min(1.0e-6).log())
         self.log_spreads = nn.Parameter(spreads.clamp_min(min_spread).log())
         self.log_falloff_powers = nn.Parameter(falloff_powers.clamp_min(1.0e-3).log())
 
@@ -81,6 +91,11 @@ class AreaEmitterModel(nn.Module):
         return self.log_colors.exp().clamp_max(self.max_color)
 
     @property
+    def axis_gains(self) -> Tensor:
+        positive = self.log_axis_gains.exp()
+        return positive / positive.mean(dim=-1, keepdim=True).clamp_min(1.0e-8)
+
+    @property
     def spreads(self) -> Tensor:
         return self.log_spreads.exp().clamp(self.min_spread, self.max_spread)
 
@@ -94,6 +109,7 @@ class AreaEmitterModel(nn.Module):
             quaternions=safe_normalize(self.raw_quaternions.detach().clone(), dim=-1),
             scales=self.scales.detach().clone(),
             colors=self.colors.detach().clone(),
+            axis_gains=self.axis_gains.detach().clone(),
             spreads=self.spreads.detach().clone(),
             falloff_powers=self.falloff_powers.detach().clone(),
         )
@@ -160,6 +176,12 @@ class AreaEmitterModel(nn.Module):
             posinf=float(torch.log(torch.tensor(self.max_color))),
             neginf=float(torch.log(torch.tensor(1.0e-6))),
         ).clamp_(float(torch.log(torch.tensor(1.0e-6))), float(torch.log(torch.tensor(self.max_color))))
+        self.log_axis_gains.data = torch.nan_to_num(
+            self.log_axis_gains.data,
+            nan=0.0,
+            posinf=12.0,
+            neginf=-12.0,
+        ).clamp_(-12.0, 12.0)
         self.log_spreads.data = torch.nan_to_num(
             self.log_spreads.data,
             nan=0.0,
@@ -177,32 +199,89 @@ class AreaEmitterModel(nn.Module):
             float(torch.log(torch.tensor(1.0e-3))), float(torch.log(torch.tensor(self.max_falloff_power)))
         )
 
-    def radiance(self, omega: Tensor) -> Tensor:
-        """Evaluate Equation 1 for directions from surface point toward emitters.
+    @staticmethod
+    def _signed_axis_weights(local_direction: Tensor, sharpness: float) -> Tensor:
+        if sharpness <= 0.0:
+            raise ValueError("axis_lobe_sharpness must be positive")
+        x, y, z = local_direction.unbind(dim=-1)
+        signed_alignment = torch.stack((x, -x, y, -y, z, -z), dim=-1)
+        return torch.softmax(float(sharpness) * signed_alignment, dim=-1)
+
+    def _axis_direction_gain(
+        self,
+        local_direction: Tensor,
+        gains: Tensor,
+        axis_lobe_sharpness: float,
+        use_axis_gains: bool,
+    ) -> Tensor:
+        if not use_axis_gains:
+            return local_direction.new_ones(local_direction.shape[:-1] + (1,))
+        weights = self._signed_axis_weights(local_direction, axis_lobe_sharpness)
+        return (weights * gains).sum(dim=-1, keepdim=True)
+
+    def radiance(
+        self,
+        omega_out: Tensor,
+        *,
+        axis_lobe_sharpness: float = 12.0,
+        use_axis_gains: bool = True,
+    ) -> Tensor:
+        """Evaluate emitted radiance along emitter-outgoing directions.
 
         Args:
-            omega: Tensor with shape [..., num_emitters, 3] or [..., 3].
+            omega_out: Tensor with shape [..., num_emitters, 3] or [..., 3].
+            axis_lobe_sharpness: Soft assignment sharpness for local signed axes.
+            use_axis_gains: False exactly recovers the symmetric Equation 1 model.
         """
 
-        if omega.shape[-2] != self.num_emitters:
-            omega = omega.unsqueeze(-2).expand(omega.shape[:-1] + (self.num_emitters, 3))
+        if omega_out.ndim == 1:
+            omega_out = omega_out.unsqueeze(-2).expand(self.num_emitters, 3)
+        elif omega_out.shape[-2] != self.num_emitters:
+            omega_out = omega_out.unsqueeze(-2).expand(
+                omega_out.shape[:-1] + (self.num_emitters, 3)
+            )
         # R stores local emitter axes as world-space columns. With row-vector
         # tensors the world-to-local transform R^T v is written v @ R.
-        local = torch.einsum("...ei,eij->...ej", safe_normalize(omega, dim=-1), self.rotations)
+        local = torch.einsum(
+            "...ei,eij->...ej", safe_normalize(omega_out, dim=-1), self.rotations
+        )
         angular = (local.pow(2.0) / self.spreads.pow(2.0)).sum(dim=-1, keepdim=True)
         falloff = torch.exp(-angular.clamp_min(0.0).pow(self.falloff_powers))
-        return self.colors.view((1,) * (falloff.ndim - 2) + self.colors.shape) * falloff
+        direction_gain = self._axis_direction_gain(
+            local,
+            self.axis_gains,
+            axis_lobe_sharpness,
+            use_axis_gains,
+        )
+        colors = self.colors.view((1,) * (falloff.ndim - 2) + self.colors.shape)
+        return colors * falloff * direction_gain
 
-    def radiance_for_ids(self, omega: Tensor, emitter_ids: Tensor) -> Tensor:
-        """Evaluate Equation 1 for per-sample emitter ids."""
+    def radiance_for_ids(
+        self,
+        omega_out: Tensor,
+        emitter_ids: Tensor,
+        *,
+        axis_lobe_sharpness: float = 12.0,
+        use_axis_gains: bool = True,
+    ) -> Tensor:
+        """Evaluate emitted radiance for per-sample emitter ids."""
 
         rotations = self.rotations[emitter_ids]
         spreads = self.spreads[emitter_ids]
         colors = self.colors[emitter_ids]
+        axis_gains = self.axis_gains[emitter_ids]
         powers = self.falloff_powers[emitter_ids]
-        local = torch.einsum("...i,...ij->...j", safe_normalize(omega, dim=-1), rotations)
+        local = torch.einsum(
+            "...i,...ij->...j", safe_normalize(omega_out, dim=-1), rotations
+        )
         angular = (local.pow(2.0) / spreads.pow(2.0)).sum(dim=-1, keepdim=True)
-        return colors * torch.exp(-angular.clamp_min(0.0).pow(powers))
+        direction_gain = self._axis_direction_gain(
+            local,
+            axis_gains,
+            axis_lobe_sharpness,
+            use_axis_gains,
+        )
+        return colors * torch.exp(-angular.clamp_min(0.0).pow(powers)) * direction_gain
 
     def sample_surface(
         self, points: Tensor, samples_per_emitter: int, generator=None
@@ -320,6 +399,7 @@ class AreaEmitterModel(nn.Module):
             centers=state.centers.to(self.centers.device),
             scales=state.scales.to(self.centers.device),
             colors=state.colors.to(self.centers.device),
+            axis_gains=state.axis_gains.to(self.centers.device),
             quaternions=state.quaternions.to(self.centers.device),
             spreads=state.spreads.to(self.centers.device),
             falloff_powers=state.falloff_powers.to(self.centers.device),

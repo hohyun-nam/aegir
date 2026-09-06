@@ -6,49 +6,15 @@ import torch
 from torch import Tensor
 
 from .brdf import MicrofacetBRDF
+from .color import display_srgb
 from .config import RenderConfig
 from .emitters import AreaEmitterModel
-from .math_utils import cosine_sample_hemisphere, safe_normalize, tonemap_reinhard
+from .math_utils import cosine_sample_hemisphere, safe_normalize
 from .visibility import resolve_visibility_parameters
 from .visibility import soft_visibility as _soft_visibility
 
 VisibilityFn = Callable[[Tensor, Tensor, Tensor], Tensor]
-
-
-@torch.no_grad()
-def attach_bounce_proxy(
-    target_gbuffer: dict[str, Tensor],
-    full_gbuffer: dict[str, Tensor],
-    proxy_radiance: Tensor,
-    config: RenderConfig,
-) -> None:
-    """Attach a sparse fixed-radiance surface used for training-time one-bounce tracing."""
-
-    if not config.indirect_bounce or config.num_bounce_samples <= 0:
-        return
-    points = full_gbuffer["points"].reshape(-1, 3)
-    radiance = proxy_radiance.reshape(-1, proxy_radiance.shape[-1])[..., :3].to(points)
-    if radiance.shape[0] != points.shape[0]:
-        raise ValueError("bounce proxy radiance must match the G-buffer resolution")
-    finite = torch.isfinite(points).all(dim=-1) & torch.isfinite(radiance).all(dim=-1)
-    points = points[finite]
-    radiance = radiance[finite].clamp(0.0, 1.0)
-    if points.numel() == 0:
-        return
-
-    max_points = config.bounce_proxy_points
-    if max_points > 0 and points.shape[0] > max_points:
-        ids = torch.linspace(0, points.shape[0] - 1, steps=max_points, device=points.device).round().long()
-        points = points[ids]
-        radiance = radiance[ids]
-
-    bmin = torch.quantile(points, 0.01, dim=0)
-    bmax = torch.quantile(points, 0.99, dim=0)
-    scene_scale = (bmax - bmin).norm().clamp_min(1.0e-4)
-    target_gbuffer["bounce_points"] = points.detach()
-    target_gbuffer["bounce_radiance"] = radiance.detach()
-    target_gbuffer["bounce_radius"] = (scene_scale * config.bounce_radius_fraction).detach()
-    target_gbuffer["bounce_max_distance"] = (scene_scale * config.bounce_max_distance_fraction).detach()
+TransportFn = Callable[[Tensor, Tensor, Tensor, bool], dict[str, Tensor]]
 
 
 class DeferredRenderer:
@@ -64,6 +30,7 @@ class DeferredRenderer:
         self,
         config: RenderConfig | None = None,
         visibility_fn: VisibilityFn | None = None,
+        transport_fn: TransportFn | None = None,
         *,
         scene_scale: float = 1.0,
     ) -> None:
@@ -74,6 +41,7 @@ class DeferredRenderer:
         )
         self.brdf = MicrofacetBRDF(eps=self.config.eps)
         self.visibility_fn = visibility_fn
+        self.transport_fn = transport_fn
 
     def render(
         self,
@@ -81,7 +49,13 @@ class DeferredRenderer:
         emitters: AreaEmitterModel,
         generator=None,
         tonemap: bool = True,
+        transport_mode: str = "training",
+        training_proxy_weight: float = 1.0,
     ) -> dict[str, Tensor]:
+        if transport_mode not in {"training", "inference"}:
+            raise ValueError("transport_mode must be 'training' or 'inference'")
+        if not 0.0 <= training_proxy_weight <= 1.0:
+            raise ValueError("training_proxy_weight must be in [0, 1]")
         shape = gbuffer["points"].shape[:-1]
         flat = {
             key: gbuffer[key].reshape(-1, gbuffer[key].shape[-1])
@@ -97,7 +71,7 @@ class DeferredRenderer:
         if occluder_points is not None:
             occluder_points = occluder_points.reshape(-1, occluder_points.shape[-1])
 
-        brdf_sum, brdf_count = self._brdf_samples(
+        brdf_direct, brdf_indirect, brdf_count = self._brdf_samples(
             points,
             normals,
             view_dirs,
@@ -107,8 +81,10 @@ class DeferredRenderer:
             emitters,
             occluder_points,
             generator,
+            transport_mode,
+            training_proxy_weight,
         )
-        light_sum, light_count = self._light_samples(
+        light_direct, light_indirect, light_count = self._light_samples(
             points,
             normals,
             view_dirs,
@@ -118,31 +94,30 @@ class DeferredRenderer:
             emitters,
             occluder_points,
             generator,
+            transport_mode,
+            training_proxy_weight,
         )
-        direct_hdr = (brdf_sum + light_sum) / float(brdf_count + light_count)
-        indirect_hdr = self._indirect_bounce(
-            points,
-            normals,
-            view_dirs,
-            albedo,
-            roughness,
-            metallic,
-            gbuffer,
-            generator,
-        )
-        hdr = (direct_hdr + indirect_hdr).reshape(shape + (3,))
+        sample_count = float(brdf_count + light_count)
+        direct_hdr = (brdf_direct + light_direct) / sample_count
+        indirect_hdr = (brdf_indirect + light_indirect) / sample_count
+        emission_hdr, emitter_mask = self._camera_visible_emission(gbuffer, emitters)
+        emitter_mask_flat = emitter_mask.reshape(-1, 1)
+        surface_mask = 1.0 - emitter_mask_flat
+        direct_hdr = direct_hdr * surface_mask
+        indirect_hdr = indirect_hdr * surface_mask
+        hdr = (direct_hdr + indirect_hdr).reshape(shape + (3,)) + emission_hdr
         direct_hdr = direct_hdr.reshape(shape + (3,))
         indirect_hdr = indirect_hdr.reshape(shape + (3,))
-        rgb = tonemap_reinhard(hdr, self.config.tonemap_exposure) if tonemap else hdr
+        rgb = display_srgb(hdr, self.config.tonemap_exposure) if tonemap else hdr
         return {
             "rgb": rgb,
             "hdr": hdr,
             "direct_hdr": direct_hdr,
             "indirect_hdr": indirect_hdr,
-            "direct_rgb": tonemap_reinhard(direct_hdr, self.config.tonemap_exposure)
-            if tonemap
-            else direct_hdr,
-            "indirect_rgb": tonemap_reinhard(indirect_hdr, self.config.tonemap_exposure)
+            "emission_hdr": emission_hdr,
+            "emitter_mask": emitter_mask,
+            "direct_rgb": display_srgb(direct_hdr, self.config.tonemap_exposure) if tonemap else direct_hdr,
+            "indirect_rgb": display_srgb(indirect_hdr, self.config.tonemap_exposure)
             if tonemap
             else indirect_hdr,
             "albedo": gbuffer["albedo"],
@@ -150,6 +125,53 @@ class DeferredRenderer:
             "metallic": gbuffer["metallic"],
             "normals": gbuffer["normals"],
         }
+
+    def _camera_visible_emission(
+        self,
+        gbuffer: dict[str, Tensor],
+        emitters: AreaEmitterModel,
+    ) -> tuple[Tensor, Tensor]:
+        """Return self-emission for the nearest camera-visible emitter.
+
+        The Gaussian G-buffer and learned emitter ellipsoids are two competing
+        scene layers.  An emitter contributes only when its first positive ray
+        intersection is closer than the expected Gaussian surface.  Invalid
+        Gaussian pixels carry an infinite surface distance, allowing an
+        emitter to remain visible against the background.
+        """
+
+        shape = gbuffer["points"].shape[:-1]
+        zeros = gbuffer["points"].new_zeros(shape + (3,))
+        zero_mask = gbuffer["points"].new_zeros(shape + (1,))
+        required = {"camera_origins", "camera_ray_dirs", "surface_distances"}
+        if (
+            not self.config.camera_visible_emitters
+            or emitters.num_emitters == 0
+            or not required.issubset(gbuffer)
+        ):
+            return zeros, zero_mask
+
+        ray_origins = gbuffer["camera_origins"].reshape(-1, 3)
+        ray_directions = safe_normalize(
+            gbuffer["camera_ray_dirs"].reshape(-1, 3),
+            dim=-1,
+        )
+        surface_distances = gbuffer["surface_distances"].reshape(-1, 1)
+        hit, emitter_distances, emitter_ids = emitters.intersect(
+            ray_origins,
+            ray_directions,
+        )
+        in_front = hit & (emitter_distances[:, 0] < surface_distances[:, 0])
+        # Emitted radiance travels from the emitter toward the camera, hence
+        # the outgoing direction at the emitter is the negative camera ray.
+        radiance = emitters.radiance_for_ids(
+            -ray_directions,
+            emitter_ids,
+            axis_lobe_sharpness=self.config.emitter_axis_lobe_sharpness,
+            use_axis_gains=self.config.six_axis_emission,
+        )
+        mask = in_front.unsqueeze(-1).to(radiance)
+        return (radiance * mask).reshape(shape + (3,)), mask.reshape(shape + (1,))
 
     def _brdf_samples(
         self,
@@ -162,28 +184,49 @@ class DeferredRenderer:
         emitters: AreaEmitterModel,
         occluder_points: Tensor | None,
         generator=None,
-    ) -> tuple[Tensor, int]:
+        transport_mode: str = "training",
+        training_proxy_weight: float = 1.0,
+    ) -> tuple[Tensor, Tensor, int]:
         n_samples = self.config.num_brdf_samples
         dirs = cosine_sample_hemisphere(n_samples, normals, generator=generator)
         ndotl = (normals[:, None] * dirs).sum(-1, keepdim=True).clamp_min(0.0)
         brdf_pdf = ndotl / torch.pi
         hit, dist, ids = emitters.intersect(points[:, None].expand_as(dirs), dirs)
         safe_dist = torch.where(hit.unsqueeze(-1), dist, torch.ones_like(dist))
+        trace_dist = torch.where(hit.unsqueeze(-1), dist, torch.full_like(dist, torch.inf))
         direct = torch.zeros_like(dirs)
         if hit.any():
-            direct = emitters.radiance_for_ids(dirs, ids) * hit.unsqueeze(-1)
+            # `dirs` points surface -> emitter, while emitter radiance is
+            # parameterized in the outgoing emitter -> surface direction.
+            direct = emitters.radiance_for_ids(
+                -dirs,
+                ids,
+                axis_lobe_sharpness=self.config.emitter_axis_lobe_sharpness,
+                use_axis_gains=self.config.six_axis_emission,
+            ) * hit.unsqueeze(-1)
         light_pdf = torch.where(
             hit.unsqueeze(-1), emitters.light_pdf_surrogate(safe_dist, ids), torch.zeros_like(dist)
         )
         mix_pdf = self._mix_pdf(brdf_pdf, light_pdf, emitters.num_emitters).clamp_min(self.config.eps)
-        visibility = self._visibility(points, dirs, safe_dist, occluder_points).where(
-            hit.unsqueeze(-1), torch.zeros_like(dist)
+        direct_incident, indirect_incident = self._incident_transport(
+            points,
+            dirs,
+            trace_dist,
+            direct,
+            emitters,
+            occluder_points,
+            generator,
+            transport_mode,
+            training_proxy_weight,
         )
         fr = self.brdf(view_dirs, dirs, normals, albedo, roughness, metallic)
-        contribution = torch.nan_to_num(
-            fr * direct * visibility * ndotl / mix_pdf, nan=0.0, posinf=1.0e4, neginf=0.0
+        direct_contribution = torch.nan_to_num(
+            fr * direct_incident * ndotl / mix_pdf, nan=0.0, posinf=1.0e4, neginf=0.0
         )
-        return contribution.sum(dim=1), n_samples
+        indirect_contribution = torch.nan_to_num(
+            fr * indirect_incident * ndotl / mix_pdf, nan=0.0, posinf=1.0e4, neginf=0.0
+        )
+        return direct_contribution.sum(dim=1), indirect_contribution.sum(dim=1), n_samples
 
     def _light_samples(
         self,
@@ -196,9 +239,11 @@ class DeferredRenderer:
         emitters: AreaEmitterModel,
         occluder_points: Tensor | None,
         generator=None,
-    ) -> tuple[Tensor, int]:
+        transport_mode: str = "training",
+        training_proxy_weight: float = 1.0,
+    ) -> tuple[Tensor, Tensor, int]:
         if emitters.num_emitters == 0 or self.config.num_light_samples <= 0:
-            return torch.zeros_like(albedo), 0
+            return torch.zeros_like(albedo), torch.zeros_like(albedo), 0
         q, dirs, dist, ids = emitters.sample_surface_total(
             points,
             self.config.num_light_samples,
@@ -209,13 +254,160 @@ class DeferredRenderer:
         brdf_pdf = ndotl / torch.pi
         light_pdf = emitters.light_pdf_surrogate(dist, ids)
         mix_pdf = self._mix_pdf(brdf_pdf, light_pdf, emitters.num_emitters).clamp_min(self.config.eps)
-        direct = emitters.radiance_for_ids(dirs, ids)
-        visibility = self._visibility(points, dirs, dist, occluder_points)
-        fr = self.brdf(view_dirs, dirs, normals, albedo, roughness, metallic)
-        contribution = torch.nan_to_num(
-            fr * direct * visibility * ndotl / mix_pdf, nan=0.0, posinf=1.0e4, neginf=0.0
+        direct = emitters.radiance_for_ids(
+            -dirs,
+            ids,
+            axis_lobe_sharpness=self.config.emitter_axis_lobe_sharpness,
+            use_axis_gains=self.config.six_axis_emission,
         )
-        return contribution.sum(dim=1), dirs.shape[1]
+        direct_incident, indirect_incident = self._incident_transport(
+            points,
+            dirs,
+            dist,
+            direct,
+            emitters,
+            occluder_points,
+            generator,
+            transport_mode,
+            training_proxy_weight,
+        )
+        fr = self.brdf(view_dirs, dirs, normals, albedo, roughness, metallic)
+        direct_contribution = torch.nan_to_num(
+            fr * direct_incident * ndotl / mix_pdf, nan=0.0, posinf=1.0e4, neginf=0.0
+        )
+        indirect_contribution = torch.nan_to_num(
+            fr * indirect_incident * ndotl / mix_pdf, nan=0.0, posinf=1.0e4, neginf=0.0
+        )
+        return direct_contribution.sum(dim=1), indirect_contribution.sum(dim=1), dirs.shape[1]
+
+    def _incident_transport(
+        self,
+        points: Tensor,
+        dirs: Tensor,
+        distances: Tensor,
+        direct_radiance: Tensor,
+        emitters: AreaEmitterModel,
+        occluder_points: Tensor | None,
+        generator,
+        transport_mode: str,
+        training_proxy_weight: float = 1.0,
+    ) -> tuple[Tensor, Tensor]:
+        """Apply AEGIR Equation 4 to one batch of primary samples."""
+
+        origins = points[:, None, :].expand_as(dirs)
+        if self.transport_fn is None:
+            visibility = self._visibility(points, dirs, distances, occluder_points)
+            return direct_radiance * visibility, torch.zeros_like(direct_radiance)
+
+        training_proxy = (
+            self.config.indirect_bounce
+            and transport_mode == "training"
+            and training_proxy_weight > 0.0
+        )
+        trace = self.transport_fn(origins, dirs, distances, training_proxy)
+        visibility = trace["visibility"].clamp(0.0, 1.0)
+        direct = direct_radiance * visibility
+        if not self.config.indirect_bounce:
+            return direct, torch.zeros_like(direct)
+        if transport_mode == "training":
+            # SH is already weighted by (1-V). Replace it continuously with
+            # differentiable emitter NEE so indirect illumination never
+            # disappears during the late emitter-only optimization phase.
+            if training_proxy_weight >= 1.0:
+                return direct, trace["training_bounce"]
+            explicit = self._explicit_secondary_bounce(trace, dirs, emitters, generator)
+            return direct, (
+                trace["training_bounce"] * training_proxy_weight
+                + explicit * (1.0 - training_proxy_weight)
+            )
+        return direct, self._explicit_secondary_bounce(trace, dirs, emitters, generator)
+
+    def _explicit_secondary_bounce(
+        self,
+        primary_trace: dict[str, Tensor],
+        primary_dirs: Tensor,
+        emitters: AreaEmitterModel,
+        generator,
+    ) -> Tensor:
+        """Estimate first-hit-to-emitter transport with differentiable NEE."""
+
+        output = torch.zeros_like(primary_dirs)
+        if self.config.num_bounce_samples <= 0 or emitters.num_emitters == 0:
+            return output
+        weight = primary_trace["occlusion_weight"]
+        hit_points = primary_trace["hit_points"]
+        hit_normals = primary_trace["hit_normals"]
+        hit_materials = primary_trace["hit_materials"]
+        finite = (
+            torch.isfinite(hit_points).all(dim=-1)
+            & torch.isfinite(hit_normals).all(dim=-1)
+            & torch.isfinite(hit_materials).all(dim=-1)
+        )
+        valid = (
+            (weight[..., 0] > self.config.eps)
+            & (primary_trace["hit_alpha"][..., 0] > self.config.eps)
+            & finite
+        )
+        valid_ids = torch.nonzero(valid.reshape(-1), as_tuple=False).flatten()
+        if valid_ids.numel() == 0:
+            return output
+
+        flat_output = output.reshape(-1, 3)
+        flat_points = hit_points.reshape(-1, 3)
+        flat_normals = hit_normals.reshape(-1, 3)
+        flat_materials = hit_materials.reshape(-1, 5)
+        flat_primary_dirs = primary_dirs.reshape(-1, 3)
+        flat_weight = weight.reshape(-1, 1)
+        valid_points = flat_points[valid_ids]
+        _, sampled_dirs, sampled_dist, sampled_emitter_ids = emitters.sample_surface_total(
+            valid_points,
+            self.config.num_bounce_samples,
+            generator=generator,
+        )
+        chunk_size = max(1, self.config.bounce_chunk_size)
+        for start in range(0, valid_ids.numel(), chunk_size):
+            ids = valid_ids[start : start + chunk_size]
+            points = flat_points[ids]
+            normals = safe_normalize(flat_normals[ids], dim=-1)
+            materials = flat_materials[ids]
+            albedo = materials[:, :3].clamp(0.0, 1.0)
+            roughness = materials[:, 3:4].clamp(0.02, 1.0)
+            metallic = materials[:, 4:5].clamp(0.0, 1.0)
+            stop = start + ids.numel()
+            secondary_dirs = sampled_dirs[start:stop]
+            secondary_dist = sampled_dist[start:stop]
+            emitter_ids = sampled_emitter_ids[start:stop]
+            emission = emitters.radiance_for_ids(
+                -secondary_dirs,
+                emitter_ids,
+                axis_lobe_sharpness=self.config.emitter_axis_lobe_sharpness,
+                use_axis_gains=self.config.six_axis_emission,
+            )
+            secondary_visibility = self._visibility(
+                points, secondary_dirs, secondary_dist, None
+            )
+            ndotl = (
+                normals[:, None, :] * secondary_dirs
+            ).sum(-1, keepdim=True).clamp_min(0.0)
+            light_pdf = emitters.light_pdf_surrogate(secondary_dist, emitter_ids).clamp_min(
+                self.config.eps
+            )
+            fr = self.brdf(
+                -flat_primary_dirs[ids],
+                secondary_dirs,
+                normals,
+                albedo,
+                roughness,
+                metallic,
+            )
+            contribution = torch.nan_to_num(
+                fr * emission * secondary_visibility * ndotl / light_pdf,
+                nan=0.0,
+                posinf=1.0e4,
+                neginf=0.0,
+            ).mean(dim=1)
+            flat_output[ids] = flat_weight[ids] * contribution
+        return output
 
     def _mix_pdf(self, brdf_pdf: Tensor, light_pdf: Tensor, num_emitters: int) -> Tensor:
         n_brdf = float(self.config.num_brdf_samples)
@@ -268,92 +460,6 @@ class DeferredRenderer:
             visible[start:end] = (~occluded).to(visible)
 
         return visible.reshape_as(distances)
-
-    def _indirect_bounce(
-        self,
-        points: Tensor,
-        normals: Tensor,
-        view_dirs: Tensor,
-        albedo: Tensor,
-        roughness: Tensor,
-        metallic: Tensor,
-        gbuffer: dict[str, Tensor],
-        generator=None,
-    ) -> Tensor:
-        if not self.config.indirect_bounce or self.config.num_bounce_samples <= 0:
-            return torch.zeros_like(albedo)
-        proxy_points = gbuffer.get("bounce_points")
-        proxy_radiance = gbuffer.get("bounce_radiance")
-        if proxy_points is None or proxy_radiance is None:
-            return torch.zeros_like(albedo)
-
-        dirs = cosine_sample_hemisphere(self.config.num_bounce_samples, normals, generator=generator).detach()
-        hit_radiance = self._trace_bounce_proxy(
-            points[:, None].expand_as(dirs),
-            dirs,
-            proxy_points,
-            proxy_radiance,
-            gbuffer.get("bounce_radius"),
-            gbuffer.get("bounce_max_distance"),
-        )
-        ndotl = (normals[:, None] * dirs).sum(dim=-1, keepdim=True).clamp_min(0.0)
-        pdf = (ndotl / torch.pi).clamp_min(self.config.eps)
-        fr = self.brdf(view_dirs, dirs, normals, albedo, roughness, metallic)
-        contribution = torch.nan_to_num(fr * hit_radiance * ndotl / pdf, nan=0.0, posinf=1.0e4, neginf=0.0)
-        return contribution.mean(dim=1) * self.config.bounce_strength
-
-    @torch.no_grad()
-    def _trace_bounce_proxy(
-        self,
-        ray_origins: Tensor,
-        ray_directions: Tensor,
-        proxy_points: Tensor,
-        proxy_radiance: Tensor,
-        radius: Tensor | None,
-        max_distance: Tensor | None,
-    ) -> Tensor:
-        origins = ray_origins.reshape(-1, 3)
-        directions = safe_normalize(ray_directions.reshape(-1, 3), dim=-1)
-        proxy_points = proxy_points.reshape(-1, 3).to(origins)
-        proxy_radiance = proxy_radiance.reshape(-1, 3).to(origins)
-        if proxy_points.numel() == 0:
-            return torch.zeros(ray_directions.shape[:-1] + (3,), device=origins.device, dtype=origins.dtype)
-
-        radius_value = (
-            radius.to(origins).clamp_min(self.config.eps)
-            if radius is not None
-            else torch.as_tensor(self.config.visibility_radius, device=origins.device, dtype=origins.dtype)
-        )
-        max_distance_value = (
-            max_distance.to(origins)
-            if max_distance is not None
-            else torch.as_tensor(torch.inf, device=origins.device, dtype=origins.dtype)
-        )
-        radius_sq = radius_value.square()
-        bias = torch.maximum(
-            torch.as_tensor(self.visibility_bias, device=origins.device, dtype=origins.dtype),
-            radius_value * 1.5,
-        )
-        output = torch.zeros_like(origins)
-        chunk_size = max(1, self.config.bounce_chunk_size)
-
-        for start in range(0, origins.shape[0], chunk_size):
-            end = min(start + chunk_size, origins.shape[0])
-            origin = origins[start:end]
-            direction = directions[start:end]
-            rel = proxy_points[None, :, :] - origin[:, None, :]
-            distance = (rel * direction[:, None, :]).sum(dim=-1)
-            perpendicular_sq = (rel.square().sum(dim=-1) - distance.square()).clamp_min(0.0)
-            valid = (distance > bias) & (distance < max_distance_value) & (perpendicular_sq <= radius_sq)
-            candidates = torch.where(valid, distance, torch.full_like(distance, torch.inf))
-            nearest_distance, nearest_id = candidates.min(dim=-1)
-            hit = torch.isfinite(nearest_distance)
-            if bool(hit.any()):
-                chunk_output = output[start:end]
-                chunk_output[hit] = proxy_radiance[nearest_id[hit]]
-
-        return output.reshape(ray_directions.shape[:-1] + (3,))
-
 
 def soft_visibility(
     alpha_trace: Tensor,

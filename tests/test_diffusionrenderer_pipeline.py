@@ -63,6 +63,7 @@ def test_prepare_and_import_material_priors_preserve_frame_identity(tmp_path: Pa
     assert [frame["frame_index"] for frame in manifest["frames"]] == list(range(5))
     assert manifest["uses_gt_depth"] is False
     assert manifest["uses_gt_normal"] is False
+    assert manifest["expected_basecolor_output_encoding"] == "srgb"
     assert np.asarray(Image.open(prepared / "chunk_0000" / "frame_0000.png"))[0, 0].sum() == 0
 
     result = tmp_path / "result"
@@ -90,5 +91,7 @@ def test_prepare_and_import_material_priors_preserve_frame_identity(tmp_path: Pa
         assert payload["prior_albedo"].shape == (6, 6, 3)
         assert payload["prior_roughness"].shape == (6, 6, 1)
         assert payload["prior_metallic"].shape == (6, 6, 1)
+        assert payload["prior_albedo_space"] == "linear_reflectance"
+        assert payload["prior_albedo"].mean().item() < 0.22
         assert "prior_depth" not in payload
         assert "prior_normal" not in payload

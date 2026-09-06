@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from aegir.checkpoint import SUPPORTED_CHECKPOINT_FORMATS
 from aegir.gaussian_scene import (
+    GaussianMaterialBackend,
     SH_C0,
     gaussian_surface_normals,
     planarize_gaussians,
@@ -41,8 +42,7 @@ def scene_from_checkpoint(payload: dict) -> dict[str, torch.Tensor]:
     }
 
 
-def emitter_gaussians(payload: dict, rest_channels: int, green_dc: float) -> dict[str, torch.Tensor]:
-    state = payload["emitter_state"]
+def emitter_gaussians(state: dict, rest_channels: int, green_dc: float) -> dict[str, torch.Tensor]:
     centers = state["centers"].float()
     scales = state["scales"].float().clamp_min(1.0e-8)
     quats = safe_normalize(state["quaternions"].float(), dim=-1)
@@ -69,11 +69,27 @@ def main() -> None:
     parser.add_argument("--min-opacity", type=float, default=0.01)
     parser.add_argument("--max-gaussians", type=int, default=500_000)
     parser.add_argument("--emitter-green-dc", type=float, default=8.0)
+    parser.add_argument(
+        "--initial-state",
+        action="store_true",
+        help=(
+            "Export the source DN geometry/material initialization together with "
+            "the checkpoint's stored initial emitters instead of the learned state."
+        ),
+    )
     args = parser.parse_args()
     payload = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
     if payload.get("format") not in SUPPORTED_CHECKPOINT_FORMATS:
         raise ValueError("expected a shared-Gaussian AEGIR checkpoint")
-    scene = scene_from_checkpoint(payload)
+    if args.initial_state:
+        emitter_state = payload.get("initial_emitter_state")
+        if emitter_state is None:
+            raise ValueError("checkpoint has no stored initial_emitter_state")
+        source_scene = GaussianMaterialBackend(payload["source_dnsplatter_checkpoint"])
+        scene = scene_from_checkpoint({"scene_state": source_scene.state_dict()})
+    else:
+        emitter_state = payload["emitter_state"]
+        scene = scene_from_checkpoint(payload)
     before = scene["means"].shape[0]
     scene = filter_gaussians(
         scene,
@@ -85,7 +101,7 @@ def main() -> None:
         drop_large_scales=True,
         large_scale_quantile=0.999,
     )
-    emitters = emitter_gaussians(payload, scene["f_rest"].shape[1], args.emitter_green_dc)
+    emitters = emitter_gaussians(emitter_state, scene["f_rest"].shape[1], args.emitter_green_dc)
     merged = {key: torch.cat((scene[key], emitters[key]), dim=0) for key in scene}
     write_binary_ply(args.output, merged)
     print(f"scene_gaussians: {scene['means'].shape[0]} / {before}")

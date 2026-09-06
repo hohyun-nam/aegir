@@ -9,6 +9,7 @@ from PIL import Image
 from torch import Tensor
 
 from .checkpoint import emitter_state_dict, load_checkpoint
+from .color import apply_ldr_pipeline, configure_ldr_fallback, display_srgb, hdr_log_image
 from .config import config_from_dict
 from .data import (
     MultiViewSceneDataset,
@@ -18,8 +19,16 @@ from .data import (
     transform_camera,
 )
 from .emitter_inspection import create_emitter_evolution_outputs
+from .evaluation import (
+    build_lpips_model,
+    masked_lpips,
+    masked_psnr,
+    masked_ssim,
+    save_raw_metric_frame,
+)
 from .gaussian_scene import GaussianMaterialBackend
 from .irgs_tracer import IRGSVisibilityTracer
+from .math_utils import linear_to_srgb
 from .render import DeferredRenderer
 from .trainer import initialize_emitters
 from .visibility import scene_scale_from_bounds
@@ -46,6 +55,8 @@ def render_full_frame(
     config,
     chunk_size: int = 256,
     visibility_tracer: IRGSVisibilityTracer | None = None,
+    generator: torch.Generator | None = None,
+    transport_mode: str = "inference",
 ) -> dict[str, Tensor]:
     gbuffer = scene.rasterize(
         camera,
@@ -55,27 +66,27 @@ def render_full_frame(
     height, width = gbuffer["points"].shape[:2]
     scene_scale = scene_scale_from_bounds(scene.bounds(config.raster.bounds_quantile))
     if visibility_tracer is None and config.render.point_visibility:
-        visibility_tracer = IRGSVisibilityTracer(
-            scene, config.render, scene_scale=scene_scale
-        )
+        visibility_tracer = IRGSVisibilityTracer(scene, config.render, scene_scale=scene_scale)
     elif visibility_tracer is not None:
         scene_scale = visibility_tracer.scene_scale
     renderer = DeferredRenderer(
         config.render,
         visibility_fn=visibility_tracer.visibility if visibility_tracer is not None else None,
+        transport_fn=(
+            visibility_tracer.trace_transport if visibility_tracer is not None else None
+        ),
         scene_scale=scene_scale,
     )
     outputs: dict[str, list[Tensor]] = {}
-    proxy_points, proxy_radiance = scene.bounce_proxy(config.render.bounce_proxy_points)
     for start in range(0, height * width, chunk_size):
         ids = torch.arange(start, min(start + chunk_size, height * width), device=scene.means.device)
         chunk = _select_flat(gbuffer, ids)
-        if config.render.indirect_bounce:
-            chunk["bounce_points"] = proxy_points
-            chunk["bounce_radiance"] = proxy_radiance
-            chunk["bounce_radius"] = scene_scale * config.render.bounce_radius_fraction
-            chunk["bounce_max_distance"] = scene_scale * config.render.bounce_max_distance_fraction
-        rendered = renderer.render(chunk, emitters)
+        rendered = renderer.render(
+            chunk,
+            emitters,
+            generator=generator,
+            transport_mode=transport_mode,
+        )
         for key, value in rendered.items():
             outputs.setdefault(key, []).append(value.reshape(-1, value.shape[-1]).cpu())
     return {key: torch.cat(chunks, dim=0).reshape(height, width, -1) for key, chunks in outputs.items()} | {
@@ -113,13 +124,24 @@ def inspect_checkpoint(
     output_dir: str | Path,
     device: str,
     max_views: int | None = None,
-    render_samples: int = 16,
+    render_samples: int = 128,
+    bounce_samples: int | None = None,
     split: str = "test",
+    evaluation_seed: int = 2026,
+    lpips_net: str = "alex",
+    training_sh_proxy: bool = False,
+    symmetric_emission: bool = False,
 ) -> None:
     scene, emitters, payload = load_checkpoint(checkpoint, device)
     config = config_from_dict(payload["config"])
     config.render.num_brdf_samples = render_samples
     config.render.num_light_samples = render_samples
+    if symmetric_emission:
+        config.render.six_axis_emission = False
+    if bounce_samples is not None:
+        if bounce_samples <= 0:
+            raise ValueError("bounce_samples must be positive")
+        config.render.num_bounce_samples = bounce_samples
     dataset = MultiViewSceneDataset(
         nerfstudio_dir,
         payload["source_dnsplatter_checkpoint"],
@@ -130,41 +152,103 @@ def inspect_checkpoint(
     )
     output_dir = Path(output_dir)
     compare_dir = output_dir / "target_render_compare_frames"
+    raw_dir = output_dir / "raw_metric_frames"
     compare_dir.mkdir(parents=True, exist_ok=True)
+    raw_dir.mkdir(parents=True, exist_ok=True)
     metrics = []
+    lpips_model = build_lpips_model(lpips_net, device)
     scene_scale = scene_scale_from_bounds(scene.bounds(config.raster.bounds_quantile))
     visibility_tracer = (
         IRGSVisibilityTracer(scene, config.render, scene_scale=scene_scale)
         if config.render.point_visibility
         else None
     )
+    observation_policy = configure_ldr_fallback(
+        dataset.observation_policy,
+        tone_mapper=config.color.ldr_fallback_tone_mapper,
+        transfer_function=config.color.ldr_fallback_transfer_function,
+    )
+    checkpoint_policy = payload.get("dataset", {}).get("observation_policy")
+    if checkpoint_policy is not None and checkpoint_policy != observation_policy:
+        raise ValueError("evaluation observation/color policy differs from the checkpoint")
+    saved_observation = payload.get("training_state", {}).get("observation")
+    learned_exposure = None
+    if observation_policy["domain"] == "ldr" and observation_policy["exposure_policy"] == "learned_scene":
+        if saved_observation is None:
+            raise ValueError("LDR checkpoint has no saved learned-exposure state")
+        learned_exposure = saved_observation["log_exposure"].exp()
     for frame in dataset.frames:
+        frame_seed = evaluation_seed + frame.index
+        generator = torch.Generator(device=torch.device(device)).manual_seed(frame_seed)
         rendered = render_full_frame(
             scene,
             emitters,
             _camera_to(frame.camera, device),
             config,
             visibility_tracer=visibility_tracer,
+            generator=generator,
+            transport_mode="training" if training_sh_proxy else "inference",
         )
-        target = frame.target
-        squared_error = (rendered["rgb"] - target).square()
-        valid = frame.mask.to(dtype=squared_error.dtype)
-        valid_values = valid.sum() * squared_error.shape[-1]
-        if not bool(valid_values > 0):
-            raise ValueError(f"frame {frame.index} has no valid pixels")
-        mse = (squared_error * valid).sum().div(valid_values).clamp_min(1.0e-12)
-        psnr = float((-10.0 * torch.log10(mse)).cpu())
-        metrics.append({"frame": frame.index, "psnr": psnr})
+        if observation_policy["domain"] == "linear_hdr":
+            if frame.radiance_hdr is None:
+                raise RuntimeError("linear-HDR evaluation frame has no HDR observation")
+            target = display_srgb(frame.radiance_hdr, config.render.tonemap_exposure)
+            prediction = display_srgb(rendered["hdr"], config.render.tonemap_exposure)
+            log_hdr_l1 = float(
+                (hdr_log_image(rendered["hdr"]) - hdr_log_image(frame.radiance_hdr))
+                .abs()[frame.mask.expand_as(rendered["hdr"])]
+                .mean()
+            )
+        else:
+            exposure = learned_exposure if learned_exposure is not None else frame.ldr_exposure_scale
+            prediction = apply_ldr_pipeline(
+                rendered["hdr"],
+                exposure=exposure,
+                tone_mapper=observation_policy["tone_mapper"],
+                transfer_function=observation_policy["transfer_function"],
+            )
+            target = frame.target
+            log_hdr_l1 = None
+        valid = frame.mask
+        psnr = float(masked_psnr(prediction, target, valid).cpu())
+        ssim_value = float(masked_ssim(prediction, target, valid).cpu())
+        lpips_value = float(masked_lpips(prediction, target, valid, lpips_model, device).cpu())
+        metrics.append(
+            {
+                "frame": frame.index,
+                "source_file": frame.source_frame["file_path"],
+                "seed": frame_seed,
+                "valid_fraction": float(valid.float().mean()),
+                "psnr": psnr,
+                "ssim": ssim_value,
+                "lpips": lpips_value,
+                "log_hdr_l1": log_hdr_l1,
+            }
+        )
+        save_raw_metric_frame(
+            raw_dir / f"frame_{frame.index:04d}.npz",
+            prediction,
+            rendered["hdr"],
+            target,
+            valid,
+            frame.radiance_hdr,
+        )
         target_image = _to_u8(target)
-        render_image = _to_u8(rendered["rgb"])
+        render_image = _to_u8(prediction)
         comparison = np.concatenate((target_image, render_image), axis=1)
         Image.fromarray(comparison).save(compare_dir / f"frame_{frame.index:04d}.png")
         if len(metrics) == 1:
             Image.fromarray(render_image).save(output_dir / "render_rgb.png")
             Image.fromarray(target_image).save(output_dir / "target_rgb.png")
-            Image.fromarray(_to_u8(rendered["albedo"])).save(output_dir / "albedo.png")
+            Image.fromarray(_to_u8(linear_to_srgb(rendered["albedo"]))).save(output_dir / "albedo.png")
             Image.fromarray(_to_u8(rendered["roughness"])).save(output_dir / "roughness.png")
             Image.fromarray(_to_u8(rendered["metallic"])).save(output_dir / "metallic.png")
+            Image.fromarray(
+                _to_u8(display_srgb(rendered["emission_hdr"], config.render.tonemap_exposure))
+            ).save(output_dir / "emission.png")
+            Image.fromarray(_to_u8(rendered["emitter_mask"])).save(
+                output_dir / "emitter_mask.png"
+            )
             Image.fromarray(_normal_u8(rendered["normals"])).save(output_dir / "normals.png")
             Image.fromarray(_depth_u8(rendered["depth"])).save(output_dir / "depth.png")
     summary = {
@@ -172,6 +256,46 @@ def inspect_checkpoint(
         "views": len(metrics),
         "split": split,
         "mean_psnr": sum(item["psnr"] for item in metrics) / len(metrics),
+        "mean_ssim": sum(item["ssim"] for item in metrics) / len(metrics),
+        "mean_lpips": sum(item["lpips"] for item in metrics) / len(metrics),
+        "evaluation": {
+            "seed": evaluation_seed,
+            "frame_seed_rule": "evaluation_seed + original_frame_index",
+            "num_brdf_samples": config.render.num_brdf_samples,
+            "num_light_samples": config.render.num_light_samples,
+            "num_bounce_samples": config.render.num_bounce_samples,
+            "six_axis_emission": config.render.six_axis_emission,
+            "emitter_axis_lobe_sharpness": config.render.emitter_axis_lobe_sharpness,
+            "render_chunk_size": 256,
+            "lpips_network": lpips_net,
+            "mask_policy": "same dataset invalid mask applied to PSNR, SSIM, and spatial LPIPS",
+            "observation_policy": observation_policy,
+            "metric_domain": (
+                "matched Reinhard+sRGB display transform applied to both linear HDR tensors"
+                if observation_policy["domain"] == "linear_hdr"
+                else "dataset-declared/fallback LDR camera domain before PNG quantization"
+            ),
+            "training_photometric_domain": (
+                "log1p scene-linear HDR"
+                if observation_policy["domain"] == "linear_hdr"
+                else observation_policy["target_encoding"]
+            ),
+            "learned_scene_exposure": (float(learned_exposure) if learned_exposure is not None else None),
+            "linear_hdr_saved": True,
+            "visualization_denoiser": "none",
+            "paper_inference_bounce_ready": not training_sh_proxy,
+            "training_sh_proxy_used": training_sh_proxy,
+            "bounce_policy": (
+                "frozen DN full-SH at the first Gaussian hit; diagnostic reconstruction mode"
+                if training_sh_proxy
+                else (
+                    f"{config.render.num_bounce_samples} emitter NEE sample(s) at the first "
+                    "secondary Gaussian hit; explicit recovered emitter radiance only, "
+                    "miss equals zero"
+                )
+            ),
+            "split_protocol": dataset.split_protocol,
+        },
         "metrics": metrics,
     }
     initial_emitter_state = payload.get("initial_emitter_state")
@@ -281,11 +405,14 @@ def render_camera_path(
     max_frames: int | None = None,
     render_samples: int = 16,
     light_scale: float = 1.0,
+    symmetric_emission: bool = False,
 ) -> None:
     scene, emitters, payload = load_checkpoint(checkpoint, device)
     config = config_from_dict(payload["config"])
     config.render.num_brdf_samples = render_samples
     config.render.num_light_samples = render_samples
+    if symmetric_emission:
+        config.render.six_axis_emission = False
     cameras = load_camera_path(
         transforms_path,
         payload["source_dnsplatter_checkpoint"],

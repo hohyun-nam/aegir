@@ -7,6 +7,7 @@ WORKSPACE=$(realpath "$ROOT/..")
 BASE=$(realpath "$WORKSPACE/..")
 DNS_ENV="${DNS_ENV:-$BASE/.conda/envs/dnsplatter}"
 PYTHON="$DNS_ENV/bin/python"
+RENDER_SAMPLES="${RENDER_SAMPLES:-128}"
 SCENE=hypersim_ai_001_004
 DN_CKPT="$ROOT/outputs/dn_splatter_zoe_pearson_10k/$SCENE/dn-splatter/zoe_pearson_colmap_10k/nerfstudio_models/step-000009999.ckpt"
 DATA="$WORKSPACE/datasets/aegir_nerfstudio/$SCENE"
@@ -61,8 +62,13 @@ echo "[1/3] Train shared Gaussian geometry, BRDF field, and emitters on 98 Hyper
   --checkpoint-every 5000 \
   --num-brdf-samples 128 \
   --num-light-samples 128 \
-  --rays-per-step 1024 \
-  --visibility-occluders 2048
+  --rays-per-step 256 \
+  --visibility-occluders 2048 \
+  --scene-cull-opacity 0.005 \
+  --scene-densify-grad 0.0008 \
+  --scene-split-scale 0.01 \
+  --scene-split-screen-size 0.05 \
+  --scene-max-gaussians 500000
 
 echo "[2/3] Re-rasterize and inspect all 98 registered views"
 "$PYTHON" -m aegir.cli inspect \
@@ -72,7 +78,7 @@ echo "[2/3] Re-rasterize and inspect all 98 registered views"
   --output-dir "$INSPECT" \
   --device cuda \
   --max-views 98 \
-  --render-samples 16
+  --render-samples "$RENDER_SAMPLES"
 
 echo "[3/3] Export shared scene and emitters for SuperSplat"
 "$PYTHON" scripts/export_scene_supersplat.py \

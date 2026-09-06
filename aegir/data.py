@@ -11,6 +11,8 @@ import torch.nn.functional as F
 from PIL import Image
 from torch import Tensor
 
+from .color import decode_prior_albedo, frame_exposure_scale, resolve_observation_policy
+
 
 @dataclass(slots=True)
 class FrameData:
@@ -20,6 +22,7 @@ class FrameData:
     camera: dict[str, Any]
     priors: dict[str, Tensor]
     radiance_hdr: Tensor | None
+    ldr_exposure_scale: float
     source_frame: dict[str, Any]
 
 
@@ -143,6 +146,51 @@ def select_frame_indices(
     )
 
 
+def describe_split_protocol(
+    metadata: dict[str, Any],
+    frames: list[dict[str, Any]],
+    split: str,
+    selected_indices: list[int],
+) -> dict[str, Any]:
+    if split == "test" and "test_filenames" not in metadata and "val_filenames" in metadata:
+        source = "val_filenames fallback"
+    elif f"{split}_filenames" in metadata:
+        source = f"{split}_filenames"
+    elif split == "all":
+        source = "all frames"
+    else:
+        source = "per-frame source_split"
+
+    report: dict[str, Any] = {
+        "requested_split": split,
+        "selection_source": source,
+        "selected_frames": len(selected_indices),
+        "held_out_from_train": False,
+        "train_overlap_frames": None,
+        "val_test_identical": None,
+        "val_test_overlap_frames": None,
+    }
+    if split not in {"val", "test"}:
+        return report
+
+    train_indices = set(select_frame_indices(metadata, frames, "train"))
+    overlap = train_indices.intersection(selected_indices)
+    if overlap:
+        raise ValueError(f"evaluation split {split!r} overlaps the train split in {len(overlap)} frame(s)")
+    report["held_out_from_train"] = True
+    report["train_overlap_frames"] = 0
+
+    try:
+        val_indices = set(select_frame_indices(metadata, frames, "val"))
+        test_indices = set(select_frame_indices(metadata, frames, "test"))
+    except ValueError:
+        return report
+    val_test_overlap = val_indices.intersection(test_indices)
+    report["val_test_identical"] = val_indices == test_indices
+    report["val_test_overlap_frames"] = len(val_test_overlap)
+    return report
+
+
 class MultiViewSceneDataset:
     """RGB cameras and 2D material priors; no trainable per-view G-buffers."""
 
@@ -159,14 +207,21 @@ class MultiViewSceneDataset:
         self.checkpoint = Path(dnsplatter_checkpoint).resolve()
         self.prior_dir = Path(prior_dir).resolve() if prior_dir is not None else None
         self.image_size = int(image_size)
+        self.max_views = max_views
         self.split = split
         metadata = json.loads((self.root / "transforms.json").read_text(encoding="utf-8"))
+        self.metadata = metadata
         source_frames = metadata.get("frames", [])
+        self.observation_policy = resolve_observation_policy(metadata, source_frames)
         selected_indices = select_frame_indices(metadata, source_frames, split)
+        self.split_protocol = describe_split_protocol(metadata, source_frames, split, selected_indices)
         if max_views is not None:
             selected_indices = selected_indices[:max_views]
+        self.split_protocol["evaluated_frames"] = len(selected_indices)
+        self.split_protocol["max_views"] = max_views
         if not selected_indices:
             raise ValueError(f"{self.root}/transforms.json has no frames for split {split!r}")
+        self.selected_indices = tuple(selected_indices)
         dataparser = load_dataparser_transform(infer_dataparser_transform_path(self.checkpoint))
         saved_to_model = saved_pose_to_model_transform(dataparser, metadata)
         self.frames = [
@@ -233,13 +288,24 @@ class MultiViewSceneDataset:
             for name in ("albedo", "roughness", "metallic"):
                 key = f"prior_{name}"
                 if key in payload:
-                    priors[name] = resize_map(payload[key].float(), target.shape[:2])
+                    value = payload[key].float()
+                    if name == "albedo":
+                        value = decode_prior_albedo(value, payload)
+                    priors[name] = resize_map(value, target.shape[:2])
             if "radiance_hdr" in payload:
                 radiance_hdr = resize_map(payload["radiance_hdr"].float(), target.shape[:2])
         if radiance_hdr is None and "radiance_hdr_file_path" in frame:
             hdr = np.load(self.root / frame["radiance_hdr_file_path"]).astype(np.float32)
             radiance_hdr = resize_map(torch.from_numpy(hdr.copy()), target.shape[:2])
-        return FrameData(index, target, mask, camera, priors, radiance_hdr, frame)
+        if radiance_hdr is not None:
+            if radiance_hdr.shape != target.shape:
+                raise ValueError(f"HDR observation for frame {index} does not have RGB shape")
+            if not bool(torch.isfinite(radiance_hdr).all()) or bool((radiance_hdr < 0.0).any()):
+                raise ValueError(f"HDR observation for frame {index} must be finite and non-negative")
+        elif self.observation_policy["domain"] == "linear_hdr":
+            raise ValueError(f"HDR observation declared but missing for frame {index}")
+        exposure_scale = frame_exposure_scale(self.observation_policy, frame)
+        return FrameData(index, target, mask, camera, priors, radiance_hdr, exposure_scale, frame)
 
     def __len__(self) -> int:
         return len(self.frames)

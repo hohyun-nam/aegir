@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+AEGIR_ROOT=$(realpath "$SCRIPT_DIR/..")
+WORKSPACE=$(realpath "$AEGIR_ROOT/..")
+BASE=$(realpath "$WORKSPACE/..")
+DNS_ENV="${DNS_ENV:-$BASE/.conda/envs/dnsplatter}"
+PYTHON="$DNS_ENV/bin/python"
+
+SCENE="${SCENE:-blender_my_room_single_room_heightdiverse_20260901}"
+DATA="${DATA:-$WORKSPACE/datasets/aegir_nerfstudio/$SCENE}"
+GT_DATA="${GT_DATA:-$WORKSPACE/datasets/aegir_nerfstudio/${SCENE}_rgb_pose_mask_gtdepth_seed}"
+SEED_DIR="${SEED_DIR:-$WORKSPACE/datasets/geometry_seeds/$SCENE}"
+SEED_PLY="$SEED_DIR/gt_depth_seed_stride4_voxel002.ply"
+PRIORS="${PRIORS:-$WORKSPACE/datasets/diffusionrenderer_priors/$SCENE}"
+
+DN_OUTPUT="${DN_OUTPUT:-$AEGIR_ROOT/outputs/2dgs_gtdepth_seedpc_l1_20k_densify10k_20260901}"
+DN_LOG="${DN_LOG:-$AEGIR_ROOT/logs/2dgs_gtdepth_seedpc_l1_20k_densify10k_20260901}"
+DN_CKPT="$DN_OUTPUT/$SCENE/nerfstudio_models/step-000020000.pt"
+HDR_DIAG="${HDR_DIAG:-$AEGIR_ROOT/outputs/hdr_emitter_preflight_20260901/$SCENE}"
+AEGIR_OUTPUT="${AEGIR_OUTPUT:-$AEGIR_ROOT/outputs/aegir_${SCENE}_gtseed_2dgs20k_frozen_origin015_bounce1_raster256_20260901/$SCENE}"
+PIPELINE_LOG="$AEGIR_OUTPUT/full_pipeline.log"
+TIMING="$AEGIR_OUTPUT/full_pipeline_timing.tsv"
+
+mkdir -p "$AEGIR_OUTPUT" "$DN_LOG" "$SEED_DIR"
+started_epoch=$(date +%s)
+started_iso=$(date --iso-8601=seconds)
+status=failed
+finish() {
+  local exit_code=$?
+  local finished_epoch finished_iso elapsed
+  finished_epoch=$(date +%s)
+  finished_iso=$(date --iso-8601=seconds)
+  elapsed=$((finished_epoch - started_epoch))
+  if (( exit_code == 0 )); then
+    status=complete
+  fi
+  {
+    printf 'status\t%s\n' "$status"
+    printf 'started\t%s\n' "$started_iso"
+    printf 'finished\t%s\n' "$finished_iso"
+    printf 'elapsed_seconds\t%s\n' "$elapsed"
+  } > "$TIMING"
+  printf 'pipeline status=%s elapsed=%02d:%02d:%02d\n' \
+    "$status" "$((elapsed / 3600))" "$(((elapsed % 3600) / 60))" "$((elapsed % 60))"
+}
+trap finish EXIT
+exec > >(tee -a "$PIPELINE_LOG") 2>&1
+
+cd "$AEGIR_ROOT"
+echo "$(date --iso-8601=seconds) Blender GT-depth full pipeline START"
+echo "scene=$SCENE"
+echo "data=$DATA"
+echo "2DGS: GT Z-depth L1, lambda_depth=0.2, lambda_dist=0, densify_until=10000, grad=0.0005"
+echo "AEGIR: geometry frozen, culling off, raster=256, origin_offset=0.15m, bounce_samples=1"
+
+echo "[1/7] Validate rendered Blender dataset"
+"$PYTHON" scripts/blender_aegir/validate_dataset.py --data "$DATA"
+
+echo "[2/7] HDR emitter diagnostics"
+if [[ ! -s "$HDR_DIAG/summary.json" ]]; then
+  "$PYTHON" scripts/visualize_hdr_emitter_candidates.py \
+    --data "$DATA" \
+    --output "$HDR_DIAG" \
+    --image-size 256 \
+    --candidate-quantile 0.995
+else
+  echo "Reusing HDR diagnostics: $HDR_DIAG"
+fi
+
+echo "[3/7] Build GT-depth back-projected seed point cloud"
+if [[ ! -s "$SEED_PLY" ]]; then
+  "$PYTHON" scripts/build_gt_depth_point_cloud.py \
+    --data "$DATA" \
+    --output "$SEED_PLY" \
+    --split train \
+    --pixel-stride 4 \
+    --voxel-size 0.02 \
+    --min-depth 0.1 \
+    --max-depth 15 \
+    --statistical-nb-neighbors 20 \
+    --statistical-std-ratio 2.0
+else
+  echo "Reusing GT-depth seed: $SEED_PLY"
+fi
+
+echo "[4/7] Prepare RGB + pose + mask + GT-depth native 2DGS view"
+if [[ ! -s "$GT_DATA/transforms.json" ]]; then
+  "$PYTHON" scripts/prepare_rgb_pose_mask_view.py \
+    --source "$DATA" \
+    --output "$GT_DATA" \
+    --mono-depth-source "$DATA/depths" \
+    --point-cloud-source "$SEED_PLY"
+else
+  echo "Reusing prepared GT-depth view: $GT_DATA"
+fi
+
+echo "[5/7] Train native 2DGS 20K with metric GT-depth L1"
+ITERATIONS=20000 \
+DATA_PATH="$GT_DATA" \
+DEPTH_LOSS_TYPE=l1 \
+LAMBDA_DEPTH=0.2 \
+LAMBDA_DIST=0 \
+DENSIFY_UNTIL_ITER=10000 \
+DENSIFY_GRAD_THRESHOLD=0.0005 \
+OUTPUT_ROOT="$DN_OUTPUT" \
+LOG_ROOT="$DN_LOG" \
+bash scripts/run_2dgs_depth_pearson_10k.sh "$SCENE"
+test -s "$DN_CKPT"
+
+echo "[6/7] Generate DiffusionRenderer material priors"
+if [[ ! -s "$PRIORS/manifest.json" ]]; then
+  bash scripts/run_diffusionrenderer_material_priors.sh \
+    "$DATA" \
+    "$SCENE" \
+    256 \
+    20
+else
+  echo "Reusing material priors: $PRIORS"
+fi
+test -s "$PRIORS/manifest.json"
+
+echo "[7/7] Train frozen-geometry AEGIR 20K, inspect 30 views, export PLY"
+GEOMETRY="$DN_CKPT" \
+DATA="$DATA" \
+PRIORS="$PRIORS" \
+GEOMETRY_LR=0 \
+SCENE_CULLING=0 \
+BOUNCE_SAMPLES=1 \
+RASTER_SIZE=256 \
+OUTPUT_ROOT="$AEGIR_OUTPUT" \
+bash scripts/run_conference_frozen_origin015_bounce8_train_inspect.sh
+
+echo "$(date --iso-8601=seconds) FULL_PIPELINE_COMPLETE"
+echo "GT seed PLY: $SEED_PLY"
+echo "2DGS PLY: $DN_OUTPUT/$SCENE/point_cloud/iteration_20000/point_cloud.ply"
+echo "2DGS checkpoint: $DN_CKPT"
+echo "AEGIR checkpoint: $AEGIR_OUTPUT/aegir_20k.pt"
+echo "Inspect: $AEGIR_OUTPUT/inspect_compare30/inspect_secondary_bounce"
+echo "AEGIR PLY: $AEGIR_OUTPUT/inspect_compare30/aegir_20k_scene_emitters.ply"
+echo "Timing: $TIMING"

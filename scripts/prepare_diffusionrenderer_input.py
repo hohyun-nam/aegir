@@ -116,6 +116,12 @@ def prepare(
         "chunk_size": chunk_size,
         "frame_count": len(records),
         "material_passes": ["basecolor", "roughness", "metallic"],
+        "input_color_metadata": metadata.get(
+            "aegir_color",
+            {"status": "legacy dataset without explicit color metadata"},
+        ),
+        "expected_basecolor_output_encoding": "srgb",
+        "imported_albedo_space": "linear_reflectance",
         "uses_gt_depth": False,
         "uses_gt_normal": False,
         "frames": records,

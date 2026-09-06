@@ -17,6 +17,24 @@ def inverse_sigmoid(value: Tensor) -> Tensor:
     return torch.log(value / (1.0 - value))
 
 
+def _training_sh_coefficients(features_dc: Tensor, features_rest: Tensor | None) -> Tensor:
+    """Return frozen DN-Splatter SH coefficients as ``[G, K, 3]``."""
+
+    if features_dc.ndim == 2 and features_dc.shape[-1] == 3:
+        features_dc = features_dc[:, None, :]
+    if features_dc.ndim != 3 or features_dc.shape[1:] != (1, 3):
+        raise ValueError(f"expected DN SH DC coefficients shaped [G, 1, 3], got {features_dc.shape}")
+    if features_rest is None:
+        return features_dc.contiguous()
+    if features_rest.ndim != 3 or features_rest.shape[0] != features_dc.shape[0] or features_rest.shape[-1] != 3:
+        raise ValueError(f"expected DN SH rest coefficients shaped [G, K, 3], got {features_rest.shape}")
+    coefficients = torch.cat((features_dc, features_rest), dim=1).contiguous()
+    degree = int(coefficients.shape[1] ** 0.5) - 1
+    if (degree + 1) ** 2 != coefficients.shape[1] or not 0 <= degree <= 3:
+        raise ValueError(f"unsupported SH coefficient count: {coefficients.shape[1]}")
+    return coefficients
+
+
 def surfel_view_matrix(c2w: Tensor) -> Tensor:
     if c2w.shape != (4, 4):
         raise ValueError(f"expected 4x4 c2w, got {tuple(c2w.shape)}")
@@ -78,6 +96,8 @@ class GaussianMaterialBackend(nn.Module):
         checkpoint: str | Path,
         opacity_threshold: float = 1.0e-4,
         max_gaussians: int | None = None,
+        albedo_initialization: str = "sh_dc",
+        neutral_albedo: float = 0.5,
     ) -> None:
         super().__init__()
         checkpoint = Path(checkpoint).resolve()
@@ -90,23 +110,48 @@ class GaussianMaterialBackend(nn.Module):
             opacity_logits = inverse_sigmoid(raw["opacities"].float())
         opacity_logits = opacity_logits.float().reshape(-1, 1)
         features_dc_raw = raw["features_dc_raw"].float()
-        if features_dc_raw.ndim == 3 and features_dc_raw.shape[1] == 1:
-            features_dc_raw = features_dc_raw[:, 0]
+        features_rest_raw = raw.get("features_rest_raw")
+        if features_rest_raw is not None:
+            features_rest_raw = features_rest_raw.float()
+        training_sh = _training_sh_coefficients(features_dc_raw, features_rest_raw)
+        features_dc_flat = training_sh[:, 0]
 
         keep = torch.isfinite(means).all(dim=-1)
         keep &= torch.isfinite(quats).all(dim=-1)
         keep &= torch.isfinite(scales).all(dim=-1)
         keep &= torch.isfinite(opacity_logits).all(dim=-1)
-        keep &= torch.isfinite(features_dc_raw).all(dim=-1)
+        keep &= torch.isfinite(training_sh).all(dim=(-1, -2))
         keep &= opacity_logits.sigmoid().flatten() > opacity_threshold
         if not bool(keep.any()):
             raise ValueError("DN-Splatter checkpoint has no finite opaque Gaussians")
 
         means = means[keep]
-        quats, scales = planarize_gaussians(quats[keep], scales[keep].clamp_min(1.0e-8))
+        quats = quats[keep]
+        scales = scales[keep].clamp_min(1.0e-8)
+        representation = str(raw.get("representation", "3dgs"))
+        if scales.shape[-1] == 3 and representation == "3dgs":
+            quats, scales = planarize_gaussians(quats, scales)
+        elif scales.shape[-1] == 2 and representation == "2dgs":
+            quats = safe_normalize(quats, dim=-1)
+        else:
+            raise ValueError(
+                "Gaussian representation/scale mismatch: "
+                f"representation={representation!r}, scales={tuple(scales.shape)}"
+            )
         opacity_logits = opacity_logits[keep]
-        features_dc_raw = features_dc_raw[keep]
-        base_color = (0.5 + SH_C0 * features_dc_raw).clamp(0.02, 0.98)
+        training_sh = training_sh[keep]
+        features_dc_flat = features_dc_flat[keep]
+        if albedo_initialization == "sh_dc":
+            base_color = (0.5 + SH_C0 * features_dc_flat).clamp(0.02, 0.98)
+        elif albedo_initialization == "neutral":
+            if not 0.0 < neutral_albedo < 1.0:
+                raise ValueError("neutral_albedo must be in (0, 1)")
+            base_color = torch.full_like(features_dc_flat, float(neutral_albedo))
+        else:
+            raise ValueError(
+                "albedo_initialization must be 'sh_dc' or 'neutral', got "
+                f"{albedo_initialization!r}"
+            )
 
         self.source_checkpoint = str(checkpoint)
         self.means = nn.Parameter(means)
@@ -116,7 +161,10 @@ class GaussianMaterialBackend(nn.Module):
         self.albedo_logits = nn.Parameter(inverse_sigmoid(base_color))
         self.roughness_logits = nn.Parameter(inverse_sigmoid(torch.full((means.shape[0], 1), 0.6)))
         self.metallic_logits = nn.Parameter(inverse_sigmoid(torch.full((means.shape[0], 1), 0.2)))
-        self.register_buffer("sh_proxy_color", base_color.clone())
+        # The DN appearance is retained only as the frozen training-time
+        # secondary-bounce proxy described in AEGIR Section 3.3. It is never
+        # part of the inference transport path.
+        self.register_buffer("training_sh_coeffs", training_sh.clone())
         self.register_buffer("initial_means", means.clone(), persistent=False)
 
     @classmethod
@@ -127,8 +175,19 @@ class GaussianMaterialBackend(nn.Module):
     ) -> GaussianMaterialBackend:
         """Restore a self-contained AEGIR scene without reopening DN-Splatter."""
 
+        state = dict(state)
         if state["log_scales"].shape[-1] != 2:
             raise ValueError("restored 2DGS state must contain exactly two tangent scales")
+        if "training_sh_coeffs" not in state:
+            # v1-v4 stored only the already evaluated DC proxy color. Preserve
+            # inference compatibility by converting that color back to a
+            # degree-0 SH coefficient. Exact resume is restricted to v5.
+            legacy_color = state.pop("sh_proxy_color", None)
+            if legacy_color is None:
+                raise ValueError("checkpoint scene state has no training SH proxy")
+            state["training_sh_coeffs"] = ((legacy_color - 0.5) / SH_C0)[:, None, :]
+        else:
+            state.pop("sh_proxy_color", None)
         scene = cls.__new__(cls)
         nn.Module.__init__(scene)
         scene.source_checkpoint = str(source_checkpoint)
@@ -139,7 +198,7 @@ class GaussianMaterialBackend(nn.Module):
         scene.albedo_logits = nn.Parameter(torch.empty_like(state["albedo_logits"]))
         scene.roughness_logits = nn.Parameter(torch.empty_like(state["roughness_logits"]))
         scene.metallic_logits = nn.Parameter(torch.empty_like(state["metallic_logits"]))
-        scene.register_buffer("sh_proxy_color", torch.empty_like(state["sh_proxy_color"]))
+        scene.register_buffer("training_sh_coeffs", torch.empty_like(state["training_sh_coeffs"]))
         scene.register_buffer("initial_means", state["means"].clone(), persistent=False)
         scene.load_state_dict(state, strict=True)
         return scene
@@ -175,6 +234,14 @@ class GaussianMaterialBackend(nn.Module):
     @property
     def normals(self) -> Tensor:
         return gaussian_surface_normals(self.quats)
+
+    @property
+    def training_sh_degree(self) -> int:
+        return int(self.training_sh_coeffs.shape[1] ** 0.5) - 1
+
+    @property
+    def trace_material_features(self) -> Tensor:
+        return torch.cat((self.albedo, self.roughness, self.metallic), dim=-1)
 
     def geometry_parameters(self) -> list[nn.Parameter]:
         return [self.means, self.log_scales, self.raw_quats, self.opacity_logits]
@@ -238,9 +305,9 @@ class GaussianMaterialBackend(nn.Module):
         )
         rasterizer = GaussianRasterizer(raster_settings=settings)
 
-        def render_attributes(attributes: Tensor) -> tuple[Tensor, Tensor]:
+        def render_attributes(attributes: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
             means2d = torch.zeros_like(self.means, requires_grad=True)
-            rendered_chw, _, auxiliary_chw = rasterizer(
+            rendered_chw, radii, auxiliary_chw = rasterizer(
                 means3D=self.means,
                 means2D=means2d,
                 colors_precomp=attributes.contiguous(),
@@ -248,15 +315,20 @@ class GaussianMaterialBackend(nn.Module):
                 scales=self.scales,
                 rotations=self.quats,
             )
-            return rendered_chw.permute(1, 2, 0), auxiliary_chw.permute(1, 2, 0)
+            return (
+                rendered_chw.permute(1, 2, 0),
+                auxiliary_chw.permute(1, 2, 0),
+                radii,
+                means2d,
+            )
 
         # The official extension is compiled for RGB attributes, so the shared
         # geometry is replayed once for the two BRDF scalar attributes.
-        rendered_albedo, auxiliary = render_attributes(self.albedo)
+        rendered_albedo, auxiliary, radii, means2d = render_attributes(self.albedo)
         scalar_attributes = torch.cat(
             (self.roughness, self.metallic, torch.zeros_like(self.roughness)), dim=-1
         )
-        rendered_scalars, _ = render_attributes(scalar_attributes)
+        rendered_scalars, _, _, _ = render_attributes(scalar_attributes)
 
         alpha = auxiliary[..., 1]
         denom = alpha.clamp_min(1.0e-6)[..., None]
@@ -276,17 +348,39 @@ class GaussianMaterialBackend(nn.Module):
         depth = torch.where(valid, depth, torch.zeros_like(depth))
         points = unproject_expected_depth(depth, {**camera, "c2w": c2w})
         view_dirs = safe_normalize(camera_position.view(1, 1, 3) - points, dim=-1)
+        unit_ray_points = unproject_expected_depth(
+            torch.ones_like(depth),
+            {**camera, "c2w": c2w},
+        )
+        camera_ray_dirs = safe_normalize(
+            unit_ray_points - camera_position.view(1, 1, 3),
+            dim=-1,
+        )
+        camera_origins = camera_position.view(1, 1, 3).expand(height, width, 3)
+        surface_distances = (points - camera_origins).norm(dim=-1, keepdim=True)
+        surface_distances = torch.where(
+            valid[..., None],
+            surface_distances,
+            torch.full_like(surface_distances, torch.inf),
+        )
         _ = rasterize_mode
         return {
             "points": points,
             "normals": normal,
             "view_dirs": view_dirs,
+            "camera_origins": camera_origins,
+            "camera_ray_dirs": camera_ray_dirs,
+            "surface_distances": surface_distances,
             "albedo": albedo,
             "roughness": roughness,
             "metallic": metallic,
             "depth": depth[..., None],
             "alpha": alpha[..., None],
             "valid_mask": valid[..., None],
+            "radii": radii,
+            # Leaf screen-space placeholder used by the official 2DGS backward
+            # pass. Its gradient drives DN-style scene densification.
+            "means2d": means2d,
         }
 
     def visibility_points(self, max_points: int) -> Tensor:
@@ -294,12 +388,6 @@ class GaussianMaterialBackend(nn.Module):
             return self.means
         ids = torch.linspace(0, self.gaussian_count - 1, max_points, device=self.means.device).round().long()
         return self.means[ids]
-
-    def bounce_proxy(self, max_points: int) -> tuple[Tensor, Tensor]:
-        if max_points <= 0 or self.gaussian_count <= max_points:
-            return self.means, self.sh_proxy_color
-        ids = torch.linspace(0, self.gaussian_count - 1, max_points, device=self.means.device).round().long()
-        return self.means[ids], self.sh_proxy_color[ids]
 
     @torch.no_grad()
     def sanitize_parameters(self, bounds: tuple[Tensor, Tensor]) -> None:

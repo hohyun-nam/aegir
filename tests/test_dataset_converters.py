@@ -4,10 +4,14 @@ import json
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
 import pytest
+from PIL import Image
 
-from aegir.conversion_common import OPENCV_TO_OPENGL, ray_distance_to_z
+from aegir.conversion_common import (
+    OPENCV_TO_OPENGL,
+    independent_val_test_split,
+    ray_distance_to_z,
+)
 from aegir.fipt_synthetic import (
     FIPT_TO_NERFSTUDIO_OPENGL,
     convert_fipt_synthetic_scene,
@@ -30,6 +34,16 @@ def test_ray_distance_to_z() -> None:
     depth = ray_distance_to_z(distance, fl_x=1.0, fl_y=1.0, cx=1.0, cy=1.0)
     assert depth[1, 1] == pytest.approx(2.0)
     assert depth[0, 0] == pytest.approx(2.0 / np.sqrt(3.0))
+
+
+def test_independent_val_test_split_preserves_train_and_interleaves_heldout() -> None:
+    train = ["frame_0.png", "frame_1.png"]
+    heldout = [f"frame_{index}.png" for index in range(2, 7)]
+    val, test, metadata = independent_val_test_split(train, heldout)
+    assert val == heldout[::2]
+    assert test == heldout[1::2]
+    assert metadata["original_shared_heldout_filenames"] == heldout
+    assert not set(train).intersection(val + test)
 
 
 def test_hypersim_standard_projection_rectification() -> None:
@@ -99,8 +113,11 @@ def test_convert_isaacsim_scene(tmp_path: Path) -> None:
     assert summary["train_frames"] == 1
     assert summary["eval_frames"] == 1
     assert converted["aegir_depth_mode"] == "z"
+    assert converted["aegir_color"]["observation_domain"] == "linear_hdr"
     assert converted["train_filenames"] == ["images/frame_0000.png"]
     assert converted["val_filenames"] == ["images/frame_0001.png"]
+    assert converted["test_filenames"] == []
+    assert converted["aegir_evaluation_split"]["format"] == "aegir-heldout-split-v1"
     assert np.load(output / "depths/frame_0000.npy").dtype == np.float32
 
 
@@ -149,10 +166,13 @@ def test_convert_fipt_synthetic_scene(
     assert converted["aegir_source_camera_convention"] == "fipt_left_up_forward_c2w"
     assert converted["source_normal_space"] == "world"
     assert converted["normal_space"] == "camera"
+    assert converted["aegir_color"]["observation_domain"] == "linear_hdr"
+    assert converted["frames"][0]["ldr_exposure_scale"] > 0.0
     assert np.allclose(converted["frames"][0]["transform_matrix"], FIPT_TO_NERFSTUDIO_OPENGL)
     assert np.array_equal(normal[2, 3], np.asarray([128, 128, 0], dtype=np.uint8))
     assert len(converted["train_filenames"]) == 1
     assert len(converted["val_filenames"]) == 1
+    assert len(converted["test_filenames"]) == 0
     assert depth[2, 3] == pytest.approx(2.0)
     assert depth[0, 0] < 2.0
 
@@ -171,4 +191,3 @@ def test_fipt_pose_conversion_preserves_center_and_rotates_camera_axes() -> None
     assert np.allclose(converted[:3, 3], source[:3, 3])
     assert np.allclose(converted, source @ FIPT_TO_NERFSTUDIO_OPENGL)
     assert np.linalg.det(converted[:3, :3]) == pytest.approx(1.0)
-

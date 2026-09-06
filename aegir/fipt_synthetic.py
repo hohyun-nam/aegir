@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import shutil
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -12,11 +12,12 @@ from PIL import Image
 from aegir.conversion_common import (
     atomic_output_dir,
     encode_normal_rgb,
+    independent_val_test_split,
     ray_distance_to_z,
     read_exr,
     save_mask,
     save_rgb,
-    tone_map_hdr,
+    tone_map_hdr_with_exposure,
     validate_c2w,
 )
 
@@ -46,9 +47,7 @@ def fipt_world_normal_to_nerfstudio_camera(
     if normal_world.ndim != 3 or normal_world.shape[-1] != 3:
         raise ValueError(f"expected HxWx3 FIPT world normals, got {normal_world.shape}")
     rotation_c2w = np.asarray(nerfstudio_c2w, dtype=np.float64)[:3, :3]
-    return np.einsum("...i,ij->...j", normal_world, rotation_c2w).astype(
-        np.float32, copy=False
-    )
+    return np.einsum("...i,ij->...j", normal_world, rotation_c2w).astype(np.float32, copy=False)
 
 
 def _load_split(scene_dir: Path, split: str) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -178,13 +177,17 @@ def convert_fipt_synthetic_scene(
             roughness_output = staging / "roughness_gt" / f"{name}.png"
 
             source_png = source_image_base.with_suffix(".png")
+            ldr_exposure: float | None = None
             if source_png.is_file():
                 with Image.open(source_png) as image:
                     if image.size != (width, height):
                         raise ValueError(f"FIPT PNG size mismatch in {source_png}: {image.size}")
                 shutil.copy2(source_png, image_output)
+                ldr_observation = "fipt_source_png_unknown_camera_response"
             else:
-                save_rgb(image_output, tone_map_hdr(hdr, valid))
+                mapped, ldr_exposure = tone_map_hdr_with_exposure(hdr, valid)
+                save_rgb(image_output, mapped)
+                ldr_observation = "generated_hypersim_percentile_gamma22"
                 generated_ldr += 1
             np.save(hdr_output, hdr, allow_pickle=False)
             np.save(depth_output, depth.astype(np.float32), allow_pickle=False)
@@ -194,32 +197,36 @@ def convert_fipt_synthetic_scene(
             save_rgb(roughness_output, _material_png(roughness, valid))
 
             image_rel = image_output.relative_to(staging).as_posix()
-            frames.append(
-                {
-                    "file_path": image_rel,
-                    "radiance_hdr_file_path": hdr_output.relative_to(staging).as_posix(),
-                    "depth_file_path": depth_output.relative_to(staging).as_posix(),
-                    "normal_camera_file_path": normal_output.relative_to(staging).as_posix(),
-                    "mask_path": mask_output.relative_to(staging).as_posix(),
-                    "albedo_gt_file_path": albedo_output.relative_to(staging).as_posix(),
-                    "roughness_gt_file_path": roughness_output.relative_to(staging).as_posix(),
-                    "transform_matrix": transform.tolist(),
-                    "fl_x": float(fl_x),
-                    "fl_y": float(fl_y),
-                    "cx": float(cx),
-                    "cy": float(cy),
-                    "w": width,
-                    "h": height,
-                    "source_split": split,
-                    "source_frame": source_stem,
-                }
-            )
+            frame = {
+                "file_path": image_rel,
+                "radiance_hdr_file_path": hdr_output.relative_to(staging).as_posix(),
+                "depth_file_path": depth_output.relative_to(staging).as_posix(),
+                "normal_camera_file_path": normal_output.relative_to(staging).as_posix(),
+                "mask_path": mask_output.relative_to(staging).as_posix(),
+                "albedo_gt_file_path": albedo_output.relative_to(staging).as_posix(),
+                "roughness_gt_file_path": roughness_output.relative_to(staging).as_posix(),
+                "transform_matrix": transform.tolist(),
+                "fl_x": float(fl_x),
+                "fl_y": float(fl_y),
+                "cx": float(cx),
+                "cy": float(cy),
+                "w": width,
+                "h": height,
+                "source_split": split,
+                "source_frame": source_stem,
+                "ldr_observation": ldr_observation,
+            }
+            if ldr_exposure is not None:
+                frame["ldr_exposure_scale"] = ldr_exposure
+            frames.append(frame)
             if split == "train":
                 train_filenames.append(image_rel)
             else:
                 eval_filenames.append(image_rel)
             if (output_index + 1) % 25 == 0 or output_index + 1 == len(source_frames):
-                print(f"[{scene_dir.name}] converted {output_index + 1}/{len(source_frames)} frames", flush=True)
+                print(
+                    f"[{scene_dir.name}] converted {output_index + 1}/{len(source_frames)} frames", flush=True
+                )
 
         metadata: dict[str, Any] = {
             "camera_model": "OPENCV",
@@ -240,19 +247,32 @@ def convert_fipt_synthetic_scene(
             "aegir_depth_convention": "opencv",
             "aegir_depth_mode": "z",
             "depth_unit_scale_factor": 1.0,
+            "aegir_color": {
+                "format": "aegir-color-v1",
+                "observation_domain": "linear_hdr",
+                "hdr_encoding": "scene_linear_rgb",
+                "target_png": {
+                    "exposure_policy": "per_frame_or_source_unknown",
+                    "tone_mapper": "clip",
+                    "transfer_function": "gamma22",
+                    "source": "per-frame ldr_observation metadata",
+                },
+            },
             "source_normal_space": "world",
             "normal_space": "camera",
             "normal_camera_convention": "opengl",
             "normal_encoding": "RGB uint8 maps XYZ from [0,255] to [-1,1]",
             "source_scene": str(scene_dir),
             "train_filenames": train_filenames,
-            "val_filenames": eval_filenames,
-            "test_filenames": eval_filenames,
             "frames": frames,
         }
-        (staging / "transforms.json").write_text(
-            json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
+        val_filenames, test_filenames, split_metadata = independent_val_test_split(
+            train_filenames, eval_filenames
         )
+        metadata["val_filenames"] = val_filenames
+        metadata["test_filenames"] = test_filenames
+        metadata["aegir_evaluation_split"] = split_metadata
+        (staging / "transforms.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
     return {
         "scene": scene_dir.name,
@@ -267,9 +287,7 @@ def convert_fipt_synthetic_scene(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
-        description="Convert a FIPT-Synthetic scene to AEGIR/Nerfstudio format."
-    )
+    parser = argparse.ArgumentParser(description="Convert a FIPT-Synthetic scene to AEGIR/Nerfstudio format.")
     parser.add_argument("--scene-dir", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--overwrite", action="store_true")

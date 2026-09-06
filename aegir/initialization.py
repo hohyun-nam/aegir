@@ -146,6 +146,10 @@ def seed_emitters_from_gbuffer_views(
         dbscan_eps if dbscan_eps is not None else max(0.03, float(scene_scale.detach().cpu()) * 0.035)
     )
     effective_score_mode = _resolve_score_mode(targets, gbuffers, samples, score_mode)
+    # A dataset is validated as entirely HDR or entirely LDR before reaching
+    # initialization.  Keep the all() guard here as a defensive fallback for
+    # direct callers and legacy checkpoints.
+    use_hdr_colors = samples is not None and all("radiance_hdr" in sample for sample in samples)
 
     scores = []
     for idx, (target, gbuffer) in enumerate(zip(targets, gbuffers, strict=True)):
@@ -167,8 +171,13 @@ def seed_emitters_from_gbuffer_views(
     view_ids = []
     for idx, (target, gbuffer) in enumerate(zip(targets, gbuffers, strict=True)):
         point = gbuffer["points"].to(device=device, dtype=dtype).reshape(-1, 3)
-        color = target.to(device=device, dtype=dtype).reshape(-1, 3)
         sample = samples[idx] if samples is not None else None
+        if use_hdr_colors:
+            assert sample is not None
+            color_source = sample["radiance_hdr"]
+        else:
+            color_source = target
+        color = color_source.to(device=device, dtype=dtype).reshape(-1, 3)
         score = (
             _emitter_candidate_score(target, gbuffer, sample, effective_score_mode)
             .to(device=device, dtype=dtype)
@@ -209,16 +218,23 @@ def seed_emitters_from_gbuffer_views(
     if not bool(persistent.any()):
         return fallback_single_emitter(bounds, device=device, dtype=dtype)
 
+    # Cluster only candidates that recur at the same 3D location across
+    # multiple views.  Letting transient candidates participate in DBSCAN can
+    # create density-connected bridges between otherwise separate fixtures,
+    # even when those candidates are excluded from the later PCA fit.
+    xyz = xyz[persistent]
+    rgb = rgb[persistent]
+    candidate_view_ids = candidate_view_ids[persistent]
     labels = _cluster_points(xyz, eps, min_samples)
     unique = [int(v) for v in labels.unique().tolist() if int(v) >= 0]
-    unique = [idx for idx in unique if int(((labels == idx) & persistent).sum()) >= min_samples]
+    unique = [idx for idx in unique if int((labels == idx).sum()) >= min_samples]
     if not unique:
         return fallback_single_emitter(bounds, device=device, dtype=dtype)
 
     clusters = sorted(
         unique,
         key=lambda idx: (
-            int(candidate_view_ids[(labels == idx) & persistent].unique().numel()),
+            int(candidate_view_ids[labels == idx].unique().numel()),
             int((labels == idx).sum()),
         ),
         reverse=True,
@@ -228,15 +244,26 @@ def seed_emitters_from_gbuffer_views(
     quats = []
     emitter_colors = []
     for idx in clusters:
-        pts = xyz[labels == idx]
-        cols = rgb[labels == idx]
+        cluster_mask = labels == idx
+        pts = xyz[cluster_mask]
+        cols = rgb[cluster_mask]
         if pts.shape[0] < 3:
             continue
         center, scale, quat = _pca_ellipsoid(pts)
         centers.append(center)
         scales.append(scale.clamp_min(scene_scale * min_scale_fraction))
         quats.append(quat)
-        emitter_colors.append(cols.mean(dim=0).clamp_min(1.0e-3) * 8.0)
+        if use_hdr_colors:
+            # The emitter's initial spread and falloff power are both one.
+            # For a unit direction its isotropic angular kernel is exp(-1),
+            # hence the amplitude must be e times the observed scene-linear
+            # radiance.  This replaces the old arbitrary LDR ``mean * 8``.
+            observed_radiance = torch.quantile(cols, 0.5, dim=0).clamp_min(1.0e-3)
+            emitter_colors.append(observed_radiance * math.e)
+        else:
+            # Preserve the legacy relative-radiance seed for LDR-only scenes;
+            # their absolute radiometric scale is not identifiable.
+            emitter_colors.append(cols.mean(dim=0).clamp_min(1.0e-3) * 8.0)
 
     if not centers:
         return fallback_single_emitter(bounds, device=device, dtype=dtype)

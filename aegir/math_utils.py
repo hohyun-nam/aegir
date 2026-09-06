@@ -38,15 +38,19 @@ def matrix_to_quat(matrix: Tensor) -> Tensor:
     m00, m01, m02 = matrix[..., 0, :].unbind(-1)
     m10, m11, m12 = matrix[..., 1, :].unbind(-1)
     m20, m21, m22 = matrix[..., 2, :].unbind(-1)
-    q_abs = torch.stack(
-        (
-            1.0 + m00 + m11 + m22,
-            1.0 + m00 - m11 - m22,
-            1.0 - m00 + m11 - m22,
-            1.0 - m00 - m11 + m22,
-        ),
-        dim=-1,
-    ).clamp_min(0.0).sqrt()
+    q_abs = (
+        torch.stack(
+            (
+                1.0 + m00 + m11 + m22,
+                1.0 + m00 - m11 - m22,
+                1.0 - m00 + m11 - m22,
+                1.0 - m00 - m11 + m22,
+            ),
+            dim=-1,
+        )
+        .clamp_min(0.0)
+        .sqrt()
+    )
     candidates = torch.stack(
         (
             torch.stack((q_abs[..., 0].square(), m21 - m12, m02 - m20, m10 - m01), dim=-1),
@@ -107,3 +111,10 @@ def linear_to_srgb(rgb: Tensor) -> Tensor:
     low = rgb * 12.92
     high = 1.055 * rgb.clamp_min(1.0e-8).pow(1.0 / 2.4) - 0.055
     return torch.where(rgb <= 0.0031308, low, high)
+
+
+def srgb_to_linear(rgb: Tensor) -> Tensor:
+    rgb = rgb.clamp(0.0, 1.0)
+    low = rgb / 12.92
+    high = ((rgb + 0.055) / 1.055).clamp_min(0.0).pow(2.4)
+    return torch.where(rgb <= 0.04045, low, high)

@@ -19,7 +19,7 @@ the same change whenever an item is implemented or validated.
 
 ## Representation
 
-One DN-Splatter checkpoint provides a single set of trainable planar 2D Gaussians:
+One geometry checkpoint provides a single set of trainable planar 2D Gaussians:
 
 - geometry: mean, two tangent log-scales, quaternion, opacity logit
 - material: albedo, roughness, metallic per Gaussian
@@ -28,9 +28,11 @@ One DN-Splatter checkpoint provides a single set of trainable planar 2D Gaussian
 Every camera differentiably rasterizes these shared Gaussian attributes into a
 temporary G-buffer. There are no trainable per-camera material maps.
 
-DN-Splatter's thinnest 3D scale axis is moved to local z at import and discarded.
-The official 2D Gaussian Splatting `diff-surfel-rasterization` CUDA extension then
-rasterizes ray-surfel intersections, expected depth, alpha, and surface normals.
+Native 2DGS checkpoints keep their two learned tangent scales and quaternion
+unchanged. Legacy 3DGS DN-Splatter checkpoints remain supported by moving the
+thinnest 3D scale axis to local z and discarding it at import. The official 2D
+Gaussian Splatting `diff-surfel-rasterization` CUDA extension then rasterizes
+ray-surfel intersections, expected depth, alpha, and surface normals.
 
 Install the extension in the active training environment with:
 
@@ -48,13 +50,149 @@ bash scripts/install_irgs_tracer.sh
 DiffusionRenderer maps are 2D pseudo-ground-truth losses. Paper-style material
 initialization uses DN SH/DC for albedo, roughness 0.6, and metallic 0.2.
 
+## Native 2DGS depth initialization
+
+The preferred geometry initialization avoids the legacy 3DGS-to-2DGS
+planarization step. A separate worktree at `../external/dn-splatter-2dgs` uses
+the upstream `ags-mesh-2dgs` implementation with the following workspace
+compatibility changes:
+
+- direct loading of AEGIR/Nerfstudio OpenGL poses, masks, per-frame intrinsics,
+  `mono_depth/*.npy`, and the fixed-pose COLMAP point cloud
+- scale-invariant Pearson supervision for raw ZoeDepth
+- a SciPy nearest-neighbor fallback in place of the legacy `simple-knn` CUDA
+  extension, while retaining the installed official 2DGS rasterizer
+- current Matplotlib canvas compatibility
+
+Run a 10K native 2DGS initialization for conference with:
+
+```bash
+bash scripts/run_2dgs_depth_pearson_10k.sh fipt_real_conference
+```
+
+The default output is:
+
+```text
+outputs/2dgs_depth_pearson_10k_20260821/fipt_real_conference/
+  point_cloud/iteration_10000/point_cloud.ply
+  nerfstudio_models/step-000010000.pt
+  dataparser_transforms.json
+```
+
+The exported `.pt` is marked as native `2dgs`; `GaussianMaterialBackend` loads
+its two scales directly and rejects representation/scale mismatches. It can be
+passed to `aegir train-gaussian-scene` through the existing
+`--dnsplatter-checkpoint` argument. Use the original scene directory—not the
+RGB/pose/Zoe adapter directory—for AEGIR material and radiance training.
+
+For a quick end-to-end preflight, override the iteration and output roots:
+
+```bash
+ITERATIONS=1 \
+OUTPUT_ROOT="$ROOT/outputs/smoke_2dgs_depth" \
+LOG_ROOT="$ROOT/logs/smoke_2dgs_depth" \
+bash scripts/run_2dgs_depth_pearson_10k.sh fipt_real_conference
+```
+
+## Color and radiance convention
+
+AEGIR uses scene-linear, non-negative HDR observations whenever every frame has
+`radiance_hdr_file_path`. The training loss compares `log1p` radiance directly;
+display SSIM applies the same Reinhard+sRGB transform to prediction and target.
+
+For LDR-only data, `transforms.json` must use `aegir_color-v1` metadata to declare
+exposure, tone mapper, and transfer function. If the original camera response is
+unknown, the explicit fallback learns one scene-global exposure and uses
+Reinhard+sRGB. The same policy is checkpointed and enforced during resume and
+evaluation. DiffusionRenderer basecolor PNGs are treated as sRGB by default and
+decoded once to linear BRDF reflectance. Raw float arrays used by metrics are
+stored separately from visualization PNGs.
+
 ## Optimization schedule
 
-- each iteration shades a `32 x 32` patch: 1,024 primary surface points
-- each primary point uses exactly 128 BRDF and 128 balanced emitter samples
+- each iteration shades a `16 x 16` patch: 256 primary surface points
+- focus weights are computed once over the full target view with the combined
+  dataset/raster validity mask, then cropped at the exact training-patch coordinates
+- each primary point uses exactly 128 BRDF and 128 balanced emitter samples,
+  giving `256 x (128 + 128) = 65,536 = 2^16` primary transport rays per iteration;
+  once explicit NEE is active, each valid first hit adds one secondary
+  surface-to-emitter visibility segment (at most another 65,536 with the default)
+- secondary NEE uses `bounce_chunk_size=65,536` by default, avoiding hundreds
+  of small OptiX launches; this execution-only value may be changed on exact resume
 - steps 0-5K: geometry `1e-5`, material `1e-3`, emitters `1e-3`
 - steps 5K-15K: geometry/material decay to zero; emitters decay to `1e-4`
 - steps 15K-20K: emitters only
+- indirect transport cross-fades over steps 5K-15K from the frozen DN full-SH
+  first-hit proxy to differentiable explicit-emitter next-event estimation (NEE);
+  the two weights always sum to one, and steps 15K-20K use explicit NEE only
+- adaptive prune/split preserves unsplit emitter Adam state; new child moment rows
+  start at zero and share the preserved tensor-level Adam step
+- scene Gaussians use DN-style refinement after the 500-step warm-up and only
+  after statistics cover every training view: opacity `< 0.005` is culled;
+  high-gradient large Gaussians are replaced by two children with scales
+  divided by 1.6; high-gradient small Gaussians are duplicated. Large
+  world/screen-space Gaussians are never deleted without replacement
+
+## Exact checkpoint resume
+
+Trainer-produced v9 checkpoints store frozen DN full-SH training features, the
+three Adam optimizer states, Python, NumPy, CPU/CUDA RNG states, the next global
+step, fixed scene bounds and surface anchors, selected training frames, and
+emitter-adaptation plus scene-refinement gradient/visibility state. V9 also
+stores the six learned signed-axis emitter gains. Resume to a
+final global-step target with:
+
+```bash
+"$DNS_ENV/bin/aegir" train-gaussian-scene \
+  --resume /path/to/run.step10000.pt \
+  --dnsplatter-checkpoint /path/to/dn-splatter/step-000009999.ckpt \
+  --nerfstudio-dir /path/to/nerfstudio_scene \
+  --prior-dir /path/to/material_priors \
+  --output /path/to/run.pt \
+  --steps 20000 \
+  --device cuda
+```
+
+`--steps` is the final target, not the number of additional steps. The saved
+training config is authoritative; resume only changes that target and the
+output path. Exact resume deliberately rejects changed DN checkpoints, dataset
+or prior paths, selected frame identities, and visible CUDA-device counts.
+Checkpoint formats v1-v8 remain loadable for inspection/inference but cannot be
+passed to `--resume`, because their training semantics predate the current
+six-axis emitter optimizer state. `--emitter-checkpoint` is only an emitter warm start and is
+mutually exclusive with exact resume.
+
+## Held-out evaluation
+
+Install the evaluation-only LPIPS dependency in the existing environment:
+
+```bash
+"$DNS_ENV/bin/python" -m pip install -e '.[eval]'
+```
+
+`aegir inspect` computes masked PSNR, SSIM, and spatial LPIPS on the requested
+split. Its paper-oriented defaults use 128 BRDF/light samples and evaluation
+seed 2026. Float32 metric inputs, including linear HDR output, are saved under
+`raw_metric_frames/`; PNG files remain visualization-only outputs.
+
+```bash
+"$DNS_ENV/bin/aegir" inspect \
+  --checkpoint /path/to/checkpoint.pt \
+  --nerfstudio-dir /path/to/scene \
+  --prior-dir /path/to/material_priors \
+  --output-dir /path/to/evaluation \
+  --split test \
+  --render-samples 128 \
+  --evaluation-seed 2026
+```
+
+Evaluation rejects any val/test metadata that overlaps the train split and
+records split provenance in `metrics.json`. FIPT-Synthetic, HyperSim, and Isaac
+Sim preserve their original training frames and deterministically interleave the
+original shared held-out pool into independent validation and test subsets. The
+policy and recoverable original held-out list are stored as
+`aegir_evaluation_split` in `transforms.json`. FIPT-Real still requires a
+held-out protocol before final paper comparison.
 
 ## Warehouse up25
 
@@ -197,6 +335,11 @@ Render any Nerfstudio camera path from the shared BRDF scene:
 
 Primary G-buffer generation uses the official differentiable 2DGS surfel
 rasterizer and all geometry parameters receive gradients. Direct shadow rays use
-the official IRGS OptiX 2D Gaussian tracer and its differentiable opacity/depth
-outputs. The training-time secondary bounce still uses fixed DN SH/DC appearance
-proxy points; replacing that path is intentionally a separate change.
+the official IRGS OptiX 2D Gaussian tracer and its differentiable
+color/feature/opacity/depth outputs. Training reuses each primary trace to query
+both frozen DN full-SH radiance and learned first-hit material. Over steps
+5K-15K it cross-fades from the SH proxy to differentiable explicit-emitter NEE,
+so indirect transport remains present when the proxy reaches zero. Inspection
+and camera-path inference disable SH and use the same emitter-surface NEE plus
+a second IRGS visibility query. This is a single-bounce estimator rather than a
+recursive path tracer.

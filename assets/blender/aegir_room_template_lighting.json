@@ -1,0 +1,74 @@
+{
+  "train": {
+    "CeilingEmitter": {
+      "strength": 18.0,
+      "color": [
+        1.0,
+        0.78,
+        0.58
+      ]
+    },
+    "StandEmitter": {
+      "strength": 10.0,
+      "color": [
+        0.55,
+        0.72,
+        1.0
+      ]
+    }
+  },
+  "ceiling_only": {
+    "CeilingEmitter": {
+      "strength": 18.0,
+      "color": [
+        1.0,
+        0.78,
+        0.58
+      ]
+    },
+    "StandEmitter": {
+      "strength": 0.0,
+      "color": [
+        0.55,
+        0.72,
+        1.0
+      ]
+    }
+  },
+  "stand_only": {
+    "CeilingEmitter": {
+      "strength": 0.0,
+      "color": [
+        1.0,
+        0.78,
+        0.58
+      ]
+    },
+    "StandEmitter": {
+      "strength": 10.0,
+      "color": [
+        0.55,
+        0.72,
+        1.0
+      ]
+    }
+  },
+  "cool_relight": {
+    "CeilingEmitter": {
+      "strength": 13.0,
+      "color": [
+        0.58,
+        0.72,
+        1.0
+      ]
+    },
+    "StandEmitter": {
+      "strength": 16.0,
+      "color": [
+        1.0,
+        0.42,
+        0.18
+      ]
+    }
+  }
+}

@@ -7,7 +7,7 @@ import torch
 
 from .config import AEGIRConfig
 from .inspect import inspect_checkpoint, inspect_emitter_evolution, render_camera_path
-from .trainer import train_shared_gaussians
+from .trainer import resume_shared_gaussians, train_shared_gaussians
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -20,16 +20,40 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--dnsplatter-checkpoint", type=Path, required=True)
     train.add_argument("--nerfstudio-dir", type=Path, required=True)
     train.add_argument("--prior-dir", type=Path, default=None)
-    train.add_argument("--emitter-checkpoint", type=Path, default=None)
+    initialization = train.add_mutually_exclusive_group()
+    initialization.add_argument(
+        "--emitter-checkpoint",
+        type=Path,
+        default=None,
+        help="warm-start emitter values only (not an exact training resume)",
+    )
+    initialization.add_argument(
+        "--resume",
+        type=Path,
+        default=None,
+        help="resume an exact-resume v9 checkpoint; checkpoint config remains authoritative",
+    )
     train.add_argument("--output", type=Path, required=True)
     train.add_argument("--device", default="cuda")
-    train.add_argument("--steps", type=int, default=20_000)
+    train.add_argument("--steps", type=int, default=20_000, help="final global-step target")
     train.add_argument("--image-size", type=int, default=128)
     train.add_argument("--max-views", type=int, default=None)
     train.add_argument("--max-gaussians", type=int, default=None)
     train.add_argument("--max-emitters", type=int, default=16)
     train.add_argument("--geometry-lr", type=float, default=1.0e-5)
     train.add_argument("--material-lr", type=float, default=1.0e-3)
+    train.add_argument(
+        "--albedo-initialization",
+        choices=("sh_dc", "neutral"),
+        default="sh_dc",
+        help="initialize physical albedo from DN SH DC or a uniform linear gray",
+    )
+    train.add_argument(
+        "--neutral-albedo",
+        type=float,
+        default=0.5,
+        help="scene-linear RGB value used by --albedo-initialization neutral",
+    )
     train.add_argument("--emitter-lr", type=float, default=1.0e-3)
     train.add_argument("--emitter-final-lr", type=float, default=1.0e-4)
     train.add_argument("--freeze-start", type=int, default=5_000)
@@ -37,9 +61,80 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--checkpoint-every", type=int, default=5_000)
     train.add_argument("--num-brdf-samples", type=int, default=128)
     train.add_argument("--num-light-samples", type=int, default=128)
-    train.add_argument("--rays-per-step", type=int, default=1_024)
+    train.add_argument(
+        "--num-bounce-samples",
+        type=int,
+        default=1,
+        help="explicit emitter NEE samples at each first secondary hit",
+    )
+    train.add_argument(
+        "--bounce-chunk-size",
+        type=int,
+        default=65_536,
+        help=(
+            "secondary NEE rays per OptiX launch; execution-only and safe to "
+            "override during exact resume"
+        ),
+    )
+    train.add_argument(
+        "--rays-per-step",
+        type=int,
+        default=256,
+        help=(
+            "primary surface points per iteration (historical option name); "
+            "total transport rays are this value times the sum of BRDF and light samples"
+        ),
+    )
     train.add_argument("--visibility-occluders", type=int, default=2048)
+    train.add_argument(
+        "--trace-origin-offset",
+        type=float,
+        default=0.05,
+        help="absolute scene-unit ray-start offset used to suppress Gaussian self-hits",
+    )
+    train.add_argument(
+        "--no-scene-culling",
+        action="store_true",
+        help="disable DN-style scene split/duplicate refinement and opacity culling",
+    )
+    train.add_argument("--scene-cull-opacity", type=float, default=0.005)
+    train.add_argument("--scene-densify-grad", type=float, default=8.0e-4)
+    train.add_argument("--scene-split-scale", type=float, default=0.01)
+    train.add_argument("--scene-split-screen-size", type=float, default=0.05)
+    train.add_argument("--scene-max-gaussians", type=int, default=500_000)
+    train.add_argument("--scene-cull-scale", type=float, default=None, help=argparse.SUPPRESS)
+    train.add_argument(
+        "--scene-cull-screen-size", type=float, default=None, help=argparse.SUPPRESS
+    )
+    train.add_argument(
+        "--light-surface",
+        type=float,
+        default=0.0,
+        help="non-paper emitter-to-surface regularizer weight (default: disabled)",
+    )
+    train.add_argument(
+        "--light-view",
+        type=float,
+        default=0.0,
+        help="non-paper camera-frustum regularizer weight (default: disabled)",
+    )
     train.add_argument("--no-visibility", action="store_true")
+    train.add_argument(
+        "--no-camera-emitters",
+        action="store_true",
+        help="disable camera-visible emitter self-emission compositing (ablation only)",
+    )
+    train.add_argument(
+        "--symmetric-emission",
+        action="store_true",
+        help="disable learned signed-axis gains and recover symmetric AEGIR emission",
+    )
+    train.add_argument(
+        "--emitter-axis-lobe-sharpness",
+        type=float,
+        default=12.0,
+        help="soft assignment sharpness for the six local signed emitter axes",
+    )
     train.add_argument("--no-indirect", action="store_true")
 
     inspect = subparsers.add_parser(
@@ -57,7 +152,28 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("train", "val", "test", "all"),
         default="test",
     )
-    inspect.add_argument("--render-samples", type=int, default=16)
+    inspect.add_argument("--render-samples", type=int, default=128)
+    inspect.add_argument(
+        "--bounce-samples",
+        type=int,
+        default=None,
+        help="override explicit secondary-bounce samples for this inspection only",
+    )
+    inspect.add_argument("--evaluation-seed", type=int, default=2026)
+    inspect.add_argument("--lpips-net", choices=("alex", "vgg", "squeeze"), default="alex")
+    inspect.add_argument(
+        "--training-sh-proxy",
+        action="store_true",
+        help=(
+            "use the frozen DN full-SH training proxy instead of explicit secondary-bounce "
+            "tracing; fast diagnostic only, not the paper inference estimator"
+        ),
+    )
+    inspect.add_argument(
+        "--symmetric-emission",
+        action="store_true",
+        help="render with the original front/back-symmetric emission model",
+    )
 
     inspect_emitters = subparsers.add_parser(
         "inspect-emitters",
@@ -86,6 +202,11 @@ def build_parser() -> argparse.ArgumentParser:
     camera_path.add_argument("--max-frames", type=int, default=None)
     camera_path.add_argument("--render-samples", type=int, default=16)
     camera_path.add_argument("--light-scale", type=float, default=1.0)
+    camera_path.add_argument(
+        "--symmetric-emission",
+        action="store_true",
+        help="render with the original front/back-symmetric emission model",
+    )
     return parser
 
 
@@ -94,11 +215,25 @@ def main() -> None:
     if args.command == "train-gaussian-scene":
         if not str(args.device).startswith("cuda") or not torch.cuda.is_available():
             raise RuntimeError("shared Gaussian training requires CUDA and diff-surfel-rasterization")
+        if args.resume is not None:
+            resume_shared_gaussians(
+                args.resume,
+                args.dnsplatter_checkpoint,
+                args.nerfstudio_dir,
+                args.prior_dir,
+                args.output,
+                args.steps,
+                args.device,
+                bounce_chunk_size=args.bounce_chunk_size,
+            )
+            return
         config = AEGIRConfig()
         config.training.steps = args.steps
         config.raster.image_size = args.image_size
         config.training.geometry_lr = args.geometry_lr
         config.training.material_lr = args.material_lr
+        config.training.albedo_initialization = args.albedo_initialization
+        config.training.neutral_albedo = args.neutral_albedo
         config.training.emitter_lr = args.emitter_lr
         config.training.emitter_final_lr = args.emitter_final_lr
         config.training.freeze_start = args.freeze_start
@@ -107,9 +242,25 @@ def main() -> None:
         config.adaptive.max_emitters = args.max_emitters
         config.render.num_brdf_samples = args.num_brdf_samples
         config.render.num_light_samples = args.num_light_samples
+        config.render.num_bounce_samples = args.num_bounce_samples
+        config.render.bounce_chunk_size = args.bounce_chunk_size
         config.training.rays_per_step = args.rays_per_step
         config.render.visibility_occluders = args.visibility_occluders
+        config.render.trace_origin_offset = args.trace_origin_offset
+        config.scene_culling.enabled = not args.no_scene_culling
+        config.scene_culling.opacity_threshold = args.scene_cull_opacity
+        config.scene_culling.densify_grad_threshold = args.scene_densify_grad
+        config.scene_culling.densify_size_threshold = args.scene_split_scale
+        config.scene_culling.split_screen_size_threshold = args.scene_split_screen_size
+        config.scene_culling.max_gaussians = args.scene_max_gaussians
+        config.losses.light_surface = args.light_surface
+        config.losses.light_view = args.light_view
         config.render.point_visibility = not args.no_visibility
+        config.render.camera_visible_emitters = not args.no_camera_emitters
+        config.render.six_axis_emission = not args.symmetric_emission
+        if args.emitter_axis_lobe_sharpness <= 0.0:
+            raise ValueError("--emitter-axis-lobe-sharpness must be positive")
+        config.render.emitter_axis_lobe_sharpness = args.emitter_axis_lobe_sharpness
         config.render.indirect_bounce = not args.no_indirect
         train_shared_gaussians(
             args.dnsplatter_checkpoint,
@@ -131,7 +282,12 @@ def main() -> None:
             args.device,
             max_views=args.max_views,
             render_samples=args.render_samples,
+            bounce_samples=args.bounce_samples,
             split=args.split,
+            evaluation_seed=args.evaluation_seed,
+            lpips_net=args.lpips_net,
+            training_sh_proxy=args.training_sh_proxy,
+            symmetric_emission=args.symmetric_emission,
         )
     elif args.command == "inspect-emitters":
         inspect_emitter_evolution(
@@ -152,6 +308,7 @@ def main() -> None:
             max_frames=args.max_frames,
             render_samples=args.render_samples,
             light_scale=args.light_scale,
+            symmetric_emission=args.symmetric_emission,
         )
 
 

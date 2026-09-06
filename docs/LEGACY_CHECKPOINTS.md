@@ -34,17 +34,30 @@ still-unfixed transport/training differences recorded in
 comparison only. Do not resume them, report them as final paper reproduction,
 or mix their metrics with future production runs.
 
+Exact training resume now requires a trainer-produced v9 checkpoint with
+`training_state`, frozen DN full SH, SH-to-explicit-NEE transport state, and
+screen-gradient/visibility statistics for DN-style scene splitting. V9 adds
+the learned six-axis emitter parameter and its Adam state. Formats v5-v8 remain
+loadable, but exact resume is deliberately rejected because their
+training/emitter semantics differ. Formats v1-v3 lack optimizer/RNG/global-step
+state, while v4 lacks full SH state and uses the superseded secondary-bounce
+algorithm. Formats v1-v8 are therefore inspection/inference or explicit-warm-start
+only under current code.
+Being deserializable does not make an old checkpoint resumable.
+
 ## Smoke checkpoints: validation artifacts only
 
 ```text
 outputs/smoke_cuda_optix_24gb_20260813_01/*.pt
 outputs/smoke_cuda_optix_24gb_visibility_scale_20260813/*.pt
+outputs/smoke_secondary_bounce_v5_20260814/*.pt
 ```
 
-These use 512 Gaussians, one view, a 32x32 raster, 64 primary rays, two BRDF and
-two light samples, and only 10 steps. They prove CUDA/OptiX execution, finite
-gradients, checkpoint writing, and the 24 GiB guard. Never resume them into a
-real experiment and never use them for quality metrics.
+These use 512 Gaussians, one view, a 32x32 raster, 64 primary rays, and two BRDF
+and two light samples. The 2026-08-13 checks use 10 steps; the v5 secondary-bounce
+check uses 2 steps plus a separate inference render. They prove CUDA/OptiX
+execution, finite gradients, checkpoint writing, and the 24 GiB guard. Never
+resume them into a real experiment and never use them for quality metrics.
 
 ## DiffusionRenderer priors
 

@@ -1,6 +1,6 @@
 {
   "format": "aegir-checkpoint-classification-v1",
-  "verified_date": "2026-08-13",
+  "verified_date": "2026-08-14",
   "rules": [
     {
       "glob": "outputs/dn_splatter_zoe_pearson_10k/*/dn-splatter/zoe_pearson_colmap_10k/nerfstudio_models/step-*.ckpt",
@@ -25,6 +25,10 @@
     },
     {
       "glob": "outputs/smoke_cuda_optix_24gb_visibility_scale_20260813/*.pt",
+      "classification": "smoke_only_never_resume"
+    },
+    {
+      "glob": "outputs/smoke_secondary_bounce_v5_20260814/*.pt",
       "classification": "smoke_only_never_resume"
     }
   ]

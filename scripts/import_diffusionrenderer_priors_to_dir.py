@@ -12,6 +12,8 @@ import numpy as np
 import torch
 from PIL import Image
 
+from aegir.math_utils import srgb_to_linear
+
 
 def load_map(path: Path, channels: int) -> torch.Tensor:
     image = Image.open(path)
@@ -22,12 +24,6 @@ def load_map(path: Path, channels: int) -> torch.Tensor:
     return torch.from_numpy(array).float().div(255.0).clamp(0.0, 1.0)
 
 
-def srgb_to_linear(value: torch.Tensor) -> torch.Tensor:
-    low = value / 12.92
-    high = ((value + 0.055) / 1.055).clamp_min(0.0).pow(2.4)
-    return torch.where(value <= 0.04045, low, high)
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", type=Path, required=True, help="prepared RGB input directory")
@@ -35,9 +31,9 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument(
         "--basecolor-space",
-        choices=("model", "srgb"),
-        default="model",
-        help="keep DiffusionRenderer numeric output, or decode it from sRGB to linear reflectance",
+        choices=("srgb", "linear", "model"),
+        default="srgb",
+        help="source encoding; 'model' is a legacy alias for sRGB",
     )
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
@@ -73,7 +69,7 @@ def main() -> None:
             if missing:
                 raise FileNotFoundError(missing[0])
             albedo = load_map(paths["albedo"], 3)
-            if args.basecolor_space == "srgb":
+            if args.basecolor_space in {"srgb", "model"}:
                 albedo = srgb_to_linear(albedo)
             payload = {
                 "prior_albedo": albedo,
@@ -83,6 +79,7 @@ def main() -> None:
                 "source_file_path": frame["source_file_path"],
                 "prior_source": "DiffusionRenderer inverse SVD",
                 "basecolor_space": args.basecolor_space,
+                "prior_albedo_space": "linear_reflectance",
                 "uses_gt_depth": False,
                 "uses_gt_normal": False,
             }
@@ -96,6 +93,7 @@ def main() -> None:
             "frame_indices": [frame["frame_index"] for frame in manifest["frames"]],
             "fields": ["prior_albedo", "prior_roughness", "prior_metallic"],
             "basecolor_space": args.basecolor_space,
+            "prior_albedo_space": "linear_reflectance",
             "uses_gt_depth": False,
             "uses_gt_normal": False,
         }

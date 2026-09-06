@@ -4,6 +4,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+from .color import display_srgb, hdr_log_image
 from .config import LossWeights
 from .emitters import AreaEmitterModel
 
@@ -125,10 +126,48 @@ def photometric_loss(
     target: Tensor,
     weights: LossWeights,
     mask: Tensor | None = None,
+    focus_weights: Tensor | None = None,
+    saturation_threshold: float | None = None,
 ) -> Tensor:
-    w = focus_map(target, weights.focus_lambda, mask=mask)
-    l1 = _masked_mean(w * (pred - target).abs(), mask)
+    if focus_weights is None:
+        focus_weights = focus_map(target, weights.focus_lambda, mask=mask)
+    elif focus_weights.shape != target.shape[:-1] + (1,):
+        raise ValueError(
+            "focus_weights must have one weight per target pixel; "
+            f"got {tuple(focus_weights.shape)} for target {tuple(target.shape)}"
+        )
+    w = focus_weights.to(device=pred.device, dtype=pred.dtype)
+    error = (pred - target).abs()
+    if saturation_threshold is not None:
+        saturated = target.amax(dim=-1, keepdim=True) >= saturation_threshold
+        error = torch.where(saturated, (target - pred).clamp_min(0.0), error)
+    l1 = _masked_mean(w * error, mask)
     return l1 + weights.dssim_lambda * (1.0 - ssim(pred.clamp(0.0, 1.0), target.clamp(0.0, 1.0), mask=mask))
+
+
+def hdr_photometric_loss(
+    pred_hdr: Tensor,
+    target_hdr: Tensor,
+    weights: LossWeights,
+    mask: Tensor | None = None,
+    focus_weights: Tensor | None = None,
+    display_exposure: Tensor | float = 1.0,
+) -> Tensor:
+    """Compare scene-linear HDR through a symmetric log-domain objective."""
+
+    pred_log = hdr_log_image(pred_hdr)
+    target_log = hdr_log_image(target_hdr)
+    if focus_weights is None:
+        focus_weights = focus_map(target_log, weights.focus_lambda, mask=mask)
+    elif focus_weights.shape != target_hdr.shape[:-1] + (1,):
+        raise ValueError("focus_weights must have one weight per HDR target pixel")
+    l1 = _masked_mean(focus_weights.to(pred_log) * (pred_log - target_log).abs(), mask)
+    structural = ssim(
+        display_srgb(pred_hdr, display_exposure),
+        display_srgb(target_hdr, display_exposure),
+        mask=mask,
+    )
+    return l1 + weights.dssim_lambda * (1.0 - structural)
 
 
 def photometric_loss_sparse(
@@ -213,7 +252,13 @@ def emitter_regularization(
     centers = emitters.centers
     bmin, bmax = bounds
     scene_scale = (bmax.to(centers) - bmin.to(centers)).norm().clamp_min(1.0e-6)
-    area = (scales.norm(dim=-1) / scene_scale).mean()
+    # AEGIR Eq. 19 is the squared L2 norm of each emitter's scale in the
+    # normalized scene coordinates used by the paper.  This code keeps scene
+    # geometry in its source units, so normalize every scale axis first and
+    # then square.  Using ||s|| / scene_scale here would be a first-power
+    # penalty and would over-regularize small emitters relative to Eq. 19.
+    normalized_scales = scales / scene_scale
+    area = normalized_scales.square().sum(dim=-1).mean()
     white = (colors.max(dim=-1).values - colors.min(dim=-1).values).mean()
     lower = (bmin.to(centers) - centers).clamp_min(0.0)
     upper = (centers - bmax.to(centers)).clamp_min(0.0)

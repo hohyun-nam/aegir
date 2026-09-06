@@ -263,16 +263,39 @@ def _replace_two_view_geometry_with_fixed_poses(
         image_rows = connection.execute("SELECT image_id, name FROM images").fetchall()
         by_id = {int(image_id): expected_by_name[str(name)] for image_id, name in image_rows}
         keypoints: dict[int, np.ndarray] = {}
+        empty_keypoint_images = 0
         for image_id, rows, cols, blob in connection.execute(
             "SELECT image_id, rows, cols, data FROM keypoints"
         ):
-            points = np.frombuffer(blob, dtype=np.float32).reshape(int(rows), int(cols))[:, :2]
-            keypoints[int(image_id)] = points.astype(np.float64)
+            row_count = int(rows)
+            column_count = int(cols)
+            if row_count == 0 or blob is None:
+                # COLMAP stores a NULL blob for a successfully processed image
+                # with zero detected features. This is expected for occasional
+                # textureless synthetic views and must not abort triangulation
+                # for all other fixed-pose cameras.
+                keypoints[int(image_id)] = np.empty((0, 2), dtype=np.float64)
+                empty_keypoint_images += 1
+                continue
+            if column_count < 2:
+                raise RuntimeError(
+                    f"invalid keypoint column count for image {image_id}: {column_count}"
+                )
+            points = np.frombuffer(blob, dtype=np.float32)
+            expected_values = row_count * column_count
+            if points.size != expected_values:
+                raise RuntimeError(
+                    f"keypoint blob size mismatch for image {image_id}: "
+                    f"expected {expected_values}, got {points.size}"
+                )
+            keypoints[int(image_id)] = points.reshape(row_count, column_count)[:, :2].astype(
+                np.float64
+            )
 
         pair_count = 0
         inlier_count = 0
         match_rows = connection.execute(
-            "SELECT pair_id, rows, cols, data FROM matches WHERE rows > 0"
+            "SELECT pair_id, rows, cols, data FROM matches WHERE rows > 0 AND data IS NOT NULL"
         ).fetchall()
         # Clear geometries first so pairs rejected by the fixed poses cannot be
         # consumed accidentally by point_triangulator.
@@ -287,6 +310,8 @@ def _replace_two_view_geometry_with_fixed_poses(
             image_id1, image_id2 = _pair_image_ids(int(pair_id))
             camera1 = by_id[image_id1]
             camera2 = by_id[image_id2]
+            if len(keypoints.get(image_id1, ())) == 0 or len(keypoints.get(image_id2, ())) == 0:
+                continue
             matches = np.frombuffer(blob, dtype=np.uint32).reshape(int(rows), int(cols))[:, :2]
             points1 = keypoints[image_id1][matches[:, 0]]
             points2 = keypoints[image_id2][matches[:, 1]]
@@ -357,7 +382,8 @@ def _replace_two_view_geometry_with_fixed_poses(
     if pair_count == 0 or inlier_count == 0:
         raise RuntimeError("no descriptor matches are consistent with the supplied camera poses")
     print(
-        f"Fixed-pose geometric verification: {inlier_count} matches in {pair_count} image pairs",
+        f"Fixed-pose geometric verification: {inlier_count} matches in {pair_count} image pairs; "
+        f"{empty_keypoint_images} image(s) had zero detected keypoints",
         flush=True,
     )
     return pair_count, inlier_count

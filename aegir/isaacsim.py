@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import shutil
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -11,6 +11,7 @@ from PIL import Image
 
 from aegir.conversion_common import (
     atomic_output_dir,
+    independent_val_test_split,
     resolve_suffix,
     save_mask,
     validate_c2w,
@@ -124,7 +125,9 @@ def convert_isaacsim_scene(
             if source_stem in eval_stems:
                 eval_filenames.append(image_rel)
             if (output_index + 1) % 25 == 0 or output_index + 1 == len(source_frames):
-                print(f"[{scene_dir.name}] converted {output_index + 1}/{len(source_frames)} frames", flush=True)
+                print(
+                    f"[{scene_dir.name}] converted {output_index + 1}/{len(source_frames)} frames", flush=True
+                )
 
         metadata: dict[str, Any] = {
             "camera_model": "OPENCV",
@@ -145,16 +148,24 @@ def convert_isaacsim_scene(
             "aegir_depth_mode": "z",
             "source_depth_mode": "z",
             "depth_unit_scale_factor": 1.0,
+            "aegir_color": {
+                "format": "aegir-color-v1",
+                "observation_domain": "linear_hdr",
+                "hdr_encoding": "scene_linear_rgb",
+                "target_png": {"source": "Isaac Sim source PNG camera response unknown"},
+            },
             "source_scene": str(scene_dir),
             "frames": frames,
         }
         if train_filenames and eval_filenames:
+            val_filenames, test_filenames, split_metadata = independent_val_test_split(
+                train_filenames, eval_filenames
+            )
             metadata["train_filenames"] = train_filenames
-            metadata["val_filenames"] = eval_filenames
-            metadata["test_filenames"] = eval_filenames
-        (staging / "transforms.json").write_text(
-            json.dumps(metadata, indent=2) + "\n", encoding="utf-8"
-        )
+            metadata["val_filenames"] = val_filenames
+            metadata["test_filenames"] = test_filenames
+            metadata["aegir_evaluation_split"] = split_metadata
+        (staging / "transforms.json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
 
     return {
         "scene": scene_dir.name,
