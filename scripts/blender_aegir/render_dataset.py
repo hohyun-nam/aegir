@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import binascii
 import json
-import math
 import struct
 import sys
 import time
@@ -331,13 +330,31 @@ def intrinsics(scene: bpy.types.Scene, camera: bpy.types.Object) -> tuple[float,
     width = scene.render.resolution_x
     height = scene.render.resolution_y
     data = camera.data
+    if data.type != "PERSP":
+        raise RuntimeError("AEGIR capture requires a perspective camera")
     if abs(scene.render.pixel_aspect_x - scene.render.pixel_aspect_y) > 1e-8:
         raise RuntimeError("AEGIR capture requires square pixels")
     if abs(data.shift_x) > 1e-8 or abs(data.shift_y) > 1e-8:
         raise RuntimeError("AEGIR capture currently requires zero camera lens shift")
-    fx = 0.5 * width / math.tan(0.5 * data.angle_x)
-    fy = 0.5 * height / math.tan(0.5 * data.angle_y)
-    return fx, fy, width * 0.5, height * 0.5
+
+    # Blender's Camera.angle_y follows the physical sensor aspect, not
+    # necessarily the aspect ratio of the rendered image.  In particular, an
+    # AUTO-fit 36x24 mm camera rendered to a square image has square-pixel
+    # fx == fy even though angle_x != angle_y.  view_frame(scene=...) is the
+    # authoritative render frustum after sensor-fit and output-aspect handling.
+    frame = data.view_frame(scene=scene)
+    normalized_x = [float(corner.x / -corner.z) for corner in frame]
+    normalized_y = [float(corner.y / -corner.z) for corner in frame]
+    x_min, x_max = min(normalized_x), max(normalized_x)
+    y_min, y_max = min(normalized_y), max(normalized_y)
+    if x_max <= x_min or y_max <= y_min:
+        raise RuntimeError(f"invalid Blender camera view frame: {frame}")
+
+    fx = width / (x_max - x_min)
+    fy = height / (y_max - y_min)
+    cx = -x_min * fx
+    cy = y_max * fy
+    return fx, fy, cx, cy
 
 
 def emitter_metadata(obj: bpy.types.Object, config: dict) -> dict:

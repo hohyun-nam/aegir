@@ -62,3 +62,21 @@ bash "$ROOT/scripts/blender_aegir/run_server_render.sh" \
 The output already follows the AEGIR Nerfstudio/HDR contract and includes deterministic
 display PNGs, linear radiance NPY/EXR, metric z-depth, world normals, material AOVs,
 masks, emitter masks, object IDs, camera splits, and emitter metadata.
+
+## Correct captures made before the render-frustum intrinsics fix
+
+Legacy square Blender captures may contain a sensor-aspect `fl_y` even though
+the rendered image used square-pixel `fl_x == fl_y`. Preserve the raw capture
+and create a corrected dataset with regenerated z-depth metadata/products:
+
+```bash
+python "$ROOT/scripts/blender_aegir/correct_capture_intrinsics.py" \
+  --source /data/legacy_capture \
+  --output /data/legacy_capture_intrinsics_fixed \
+  --preserve-focal-axis x
+```
+
+Rendered RGB/HDR/G-buffer directories are linked read-only into the corrected
+dataset. Depth arrays are corrected from the preserved ray distance. Existing
+COLMAP, monocular-depth, and SFM-derived products are intentionally excluded;
+regenerate them using the corrected metadata before training.

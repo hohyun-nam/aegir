@@ -78,6 +78,33 @@ The Conference wrapper exposes these settings as `ALBEDO_LR`,
 
 ## Chronological changes
 
+### 2026-09-07 — Blender render-frustum intrinsics correction
+
+Problem observed:
+
+- The legacy Blender capture code computed `fx` from `Camera.angle_x` and `fy`
+  from `Camera.angle_y`. Those angles describe the physical sensor, while the
+  rendered frame also applies Blender's sensor-fit and output aspect ratio.
+- A 36x24 mm AUTO-fit camera rendered at 512x512 was therefore recorded as
+  `fx=398.22, fy=597.33`, although Blender's actual square render frustum was
+  `fx=fy=398.22`.
+- The incorrect calibration affected both fixed-pose COLMAP triangulation and
+  the ray-distance-to-z conversion used by Blender GT depth.
+
+Implementation:
+
+- `render_dataset.py` now derives `fx`, `fy`, `cx`, and `cy` from
+  `Camera.view_frame(scene=...)`, Blender's authoritative fitted render
+  frustum.
+- Added `correct_capture_intrinsics.py` to create a separate corrected legacy
+  dataset without modifying or duplicating RGB/HDR/G-buffers. It reconstructs
+  each pixel's ray distance with the legacy calibration and converts it back to
+  z-depth using the corrected calibration.
+- Corrected datasets deliberately omit old COLMAP, mono-depth, and SFM-depth
+  products. Those products must be regenerated from the corrected transforms.
+- The Conference AEGIR training method itself is unchanged by this data-camera
+  correction.
+
 ### 2026-09-07 — Fixed emitter pose and faster neutral-albedo learning
 
 Problem observed:
