@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SURFEL_DIR="${SURFEL_DIR:-$ROOT/../external/2d-gaussian-splatting/submodules/diff-surfel-rasterization}"
+SURFEL_DIR="${SURFEL_DIR:-$ROOT/external/2d-gaussian-splatting/submodules/diff-surfel-rasterization}"
 CUDA_ROOT="${CUDA_HOME:-$(python -c 'import pathlib, torch; print(pathlib.Path(torch.__file__).parent.parent / "nvidia" / "cu13")')}"
 if [[ -d "$CUDA_ROOT/lib" ]]; then
   CUDA_LIB="$CUDA_ROOT/lib"

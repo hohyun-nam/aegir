@@ -12,3 +12,10 @@ logs/
 exports/
 .torch_extensions
 .cuda
+external/**/build/
+external/**/build-optix/
+external/**/dist/
+external/**/*.so
+external/**/*.o
+external/**/*.a
+external/**/*.whl

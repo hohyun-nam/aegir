@@ -83,6 +83,20 @@ The Conference wrapper exposes these settings as `ALBEDO_LR`,
 
 ## Chronological changes
 
+### 2026-09-07 — Bundle patched extension sources for another computer
+
+- Added the currently used IRGS tracer source, including finite-segment
+  forward/backward tracing, and the 2DGS rasterizer with its GLM dependency
+  under `AEGIR/external`. Preserved upstream license and attribution files.
+- Extension installation scripts now default to these bundled sources rather
+  than the untracked sibling workspace. A normal Git clone/pull includes the
+  modifications; separate patch application is no longer needed.
+- Build outputs are ignored and must be rebuilt for the destination environment.
+  Training initialization, schedules, losses, and transport math are unchanged.
+- Checked source snapshot parity and shell syntax. A destination-machine CUDA
+  build must still be performed; this packaging change does not certify that
+  machine's compiler, driver, or PyTorch compatibility.
+
 ### 2026-09-07 — SH DC initialization with full-view material priors
 
 - Restored `sh_dc` as the default in the training config, CLI, and Conference

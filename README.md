@@ -40,12 +40,21 @@ Install the extension in the active training environment with:
 bash scripts/install_2dgs_rasterizer.sh
 ```
 
-Direct shadow visibility uses the official IRGS differentiable 2D Gaussian
-OptiX tracer. Install it after cloning IRGS at `../external/IRGS` with:
+Direct shadow visibility uses the IRGS differentiable 2D Gaussian OptiX
+tracer with our finite-segment visibility changes. Both required extension
+source trees are included in this repository under `external/`, including
+their headers and licenses. A normal clone or pull retrieves them; no separate
+IRGS clone, recursive submodule update, or visibility patch application is needed.
+Install the tracer in the active training environment with:
 
 ```bash
 bash scripts/install_irgs_tracer.sh
 ```
+
+Build both extensions on the destination computer with its PyTorch/CUDA
+environment. See [external/README.md](external/README.md) for source versions,
+licensing, and installation. The sibling `../external/dn-splatter-2dgs`
+mentioned below is only needed when retraining the initial geometry.
 
 DiffusionRenderer maps are 2D pseudo-ground-truth losses. Paper-style material
 initialization uses DN SH/DC for albedo, roughness 0.6, and metallic 0.2.

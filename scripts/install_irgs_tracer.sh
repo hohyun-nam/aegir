@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TRACER_DIR="${IRGS_TRACER_DIR:-$ROOT/../external/IRGS/submodules/surfel_tracer}"
+TRACER_DIR="${IRGS_TRACER_DIR:-$ROOT/external/IRGS/submodules/surfel_tracer}"
 CUDA_ROOT="${CUDA_HOME:-$(python -c \
   'import pathlib, torch; print(pathlib.Path(torch.__file__).parent.parent / "nvidia" / "cu13")')}"
 if [[ -d "$CUDA_ROOT/lib" ]]; then
