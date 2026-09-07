@@ -110,8 +110,8 @@ stored separately from visualization PNGs.
 
 ## Optimization schedule
 
-- physical albedo initializes to scene-linear neutral RGB `(0.5, 0.5, 0.5)`;
-  use `--albedo-initialization sh_dc` only for the historical appearance-seeded baseline
+- physical albedo initializes from DN SH DC appearance, with full-view material-prior supervision;
+  use `--albedo-initialization neutral --neutral-albedo 0.5` to reproduce the neutral initialization experiment
 - each iteration shades a `16 x 16` patch: 256 primary surface points
 - focus weights are computed once over the full target view with the combined
   dataset/raster validity mask, then cropped at the exact training-patch coordinates

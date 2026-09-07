@@ -16,7 +16,7 @@ BOUNCE_SAMPLES="${BOUNCE_SAMPLES:-8}"
 RASTER_SIZE="${RASTER_SIZE:-256}"
 GEOMETRY_LR="${GEOMETRY_LR:-0.0}"
 SCENE_CULLING="${SCENE_CULLING:-0}"
-ALBEDO_INITIALIZATION="${ALBEDO_INITIALIZATION:-neutral}"
+ALBEDO_INITIALIZATION="${ALBEDO_INITIALIZATION:-sh_dc}"
 NEUTRAL_ALBEDO="${NEUTRAL_ALBEDO:-0.5}"
 ALBEDO_LR="${ALBEDO_LR:-0.003}"
 SIX_AXIS_EMISSION="${SIX_AXIS_EMISSION:-1}"
@@ -170,8 +170,18 @@ RENDER_SAMPLES=128 \
 MAX_VIEWS=30 \
 bash "$AEGIR_ROOT/scripts/run_conference_secondary_inspect_export.sh"
 
+echo "Creating 30-view GT / DiffusionRenderer albedo / learned albedo comparison"
+"$PYTHON" scripts/compare_checkpoint_albedo.py \
+  --checkpoint "$CHECKPOINT" \
+  --dataset "$DATA" \
+  --prior-dir "$PRIORS" \
+  --output "$OUTPUT_ROOT/albedo_comparison30" \
+  --label "AEGIR ALBEDO" \
+  --split all --max-views 30 --device cuda
+
 echo "$(date --iso-8601=seconds) PIPELINE_COMPLETE"
 echo "checkpoint: $CHECKPOINT"
 echo "inspect: $INSPECT_ROOT/inspect_secondary_bounce"
 echo "target/render frames: $INSPECT_ROOT/inspect_secondary_bounce/target_render_compare_frames"
 echo "PLY: $INSPECT_ROOT/aegir_20k_scene_emitters.ply"
+echo "Albedo comparison: $OUTPUT_ROOT/albedo_comparison30"

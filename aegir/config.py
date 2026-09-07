@@ -88,9 +88,8 @@ class ColorConfig:
 class TrainingConfig:
     steps: int = 20_000
     geometry_lr: float = 1.0e-5
-    # Albedo starts from a neutral gray in the current decomposition setup and
-    # therefore gets its own faster optimizer group. Roughness and metallic
-    # continue to use ``material_lr``.
+    # Keep the faster albedo optimizer group for both SH DC and neutral seeds.
+    # Roughness and metallic continue to use ``material_lr``.
     albedo_lr: float = 3.0e-3
     material_lr: float = 1.0e-3
     emitter_lr: float = 1.0e-3
@@ -114,7 +113,7 @@ class TrainingConfig:
     # ``sh_dc`` preserves the historical appearance-based seed. ``neutral``
     # starts every Gaussian from a scene-linear gray reflectance instead, so
     # source-light shadows/highlights are not copied into physical albedo.
-    albedo_initialization: str = "neutral"
+    albedo_initialization: str = "sh_dc"
     neutral_albedo: float = 0.5
     emitter_init_score: str = "hdr"
     emitter_init_quantile: float = 0.995

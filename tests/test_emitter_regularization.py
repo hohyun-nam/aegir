@@ -124,7 +124,7 @@ def test_cli_requires_explicit_override_for_non_paper_regularizers() -> None:
     defaults = parser.parse_args(required)
     assert defaults.light_surface == 0.0
     assert defaults.light_view == 0.0
-    assert defaults.albedo_initialization == "neutral"
+    assert defaults.albedo_initialization == "sh_dc"
     assert defaults.albedo_lr == pytest.approx(3.0e-3)
     assert not defaults.optimize_emitter_centers
     assert not defaults.optimize_emitter_rotations

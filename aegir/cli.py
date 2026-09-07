@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument(
         "--albedo-initialization",
         choices=("sh_dc", "neutral"),
-        default="neutral",
+        default="sh_dc",
         help="initialize physical albedo from DN SH DC or a uniform linear gray",
     )
     train.add_argument(

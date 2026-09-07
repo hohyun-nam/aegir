@@ -62,8 +62,9 @@ Effective from 2026-09-07:
 - Emitter split/prune is disabled. Emitter identity and count therefore remain
   stable unless the historical mode is explicitly enabled.
 - Common emitter RGB, six signed-axis gains, spread, and falloff remain trainable.
-- Albedo initializes to scene-linear neutral RGB `(0.5, 0.5, 0.5)` by default;
-  `sh_dc` remains an explicit historical-baseline option.
+- Albedo initializes from DN SH DC appearance by default, using the historical
+  `(0.5 + SH_C0 * DC).clamp(0.02, 0.98)` formula without an additional color
+  conversion. Neutral RGB `(0.5, 0.5, 0.5)` remains an explicit option.
 - Albedo uses a dedicated Adam parameter group with initial LR `3e-3`.
   Roughness and metallic retain their shared `1e-3` LR. Both groups follow the
   same 5K-15K linear decay-to-zero curriculum.
@@ -81,6 +82,22 @@ The Conference wrapper exposes these settings as `ALBEDO_LR`,
 `EMITTER_ADAPTATION`.
 
 ## Chronological changes
+
+### 2026-09-07 — SH DC initialization with full-view material priors
+
+- Restored `sh_dc` as the default in the training config, CLI, and Conference
+  wrapper, to compare appearance-based initialization against the neutral v11
+  run now that material priors supervise the full view.
+- Preserved albedo LR `3e-3`, the hybrid SH-to-secondary schedule, material
+  freeze at 15K, fixed geometry and emitter pose, and HDR emitter initialization.
+- The Conference wrapper now also generates 30 GT / DiffusionRenderer albedo /
+  learned albedo panels after its 30-view secondary inspection and PLY export.
+- Checkpoint format remains v11: initialization is already stored in config,
+  and exact resume continues to use the saved state rather than reseeding it.
+- This experiment reuses the historical appearance values; it does not establish
+  that SH DC is physically calibrated linear reflectance or fix sampling noise.
+- Reproduce neutral initialization with `ALBEDO_INITIALIZATION=neutral` and
+  `NEUTRAL_ALBEDO=0.5` in a separate output directory.
 
 ### 2026-09-07 — Full-view material-prior supervision
 
