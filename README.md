@@ -142,7 +142,7 @@ stored separately from visualization PNGs.
 
 ## Exact checkpoint resume
 
-Trainer-produced v10 checkpoints store frozen DN full-SH training features, the
+Trainer-produced v11 checkpoints store frozen DN full-SH training features, the
 three Adam optimizer states, Python, NumPy, CPU/CUDA RNG states, the next global
 step, fixed scene bounds and surface anchors, selected training frames, and
 emitter scale anchors, adaptation, and scene-refinement gradient/visibility state.

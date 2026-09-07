@@ -13,7 +13,7 @@ from .config import AEGIRConfig
 from .emitters import AreaEmitterModel
 from .gaussian_scene import GaussianMaterialBackend, planarize_gaussians
 
-CHECKPOINT_FORMAT = "aegir_shared_gaussian_v10"
+CHECKPOINT_FORMAT = "aegir_shared_gaussian_v11"
 SUPPORTED_CHECKPOINT_FORMATS = {
     "aegir_shared_gaussian_v1",
     "aegir_shared_gaussian_v2",
@@ -24,6 +24,7 @@ SUPPORTED_CHECKPOINT_FORMATS = {
     "aegir_shared_gaussian_v7",
     "aegir_shared_gaussian_v8",
     "aegir_shared_gaussian_v9",
+    "aegir_shared_gaussian_v10",
     CHECKPOINT_FORMAT,
 }
 EXACT_RESUME_FORMATS = {CHECKPOINT_FORMAT}
@@ -100,8 +101,8 @@ def require_exact_resume_state(payload: dict[str, Any], path: str | Path | None 
     if payload.get("format") not in EXACT_RESUME_FORMATS or "training_state" not in payload:
         raise ValueError(
             f"checkpoint{location} has no exact-resume optimizer/RNG state; "
-            "only v10 checkpoints contain optimizer state for the split albedo LR and "
-            "constrained emitter geometry; v1-v9 are inference-only or explicit warm starts"
+            "only v11 checkpoints contain optimizer state for the full-view material objective; "
+            "v1-v10 are inference-only or explicit warm starts"
         )
     training_state = payload["training_state"]
     required = {

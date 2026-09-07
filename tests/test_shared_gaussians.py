@@ -27,6 +27,7 @@ from aegir.emitter_inspection import match_emitter_centers
 from aegir.emitters import AreaEmitterModel
 from aegir.gaussian_scene import GaussianMaterialBackend, gaussian_surface_normals, planarize_gaussians
 from aegir.initialization import _candidate_threshold
+from aegir.losses import material_prior_loss
 from aegir.render import DeferredRenderer
 from aegir.scene_culling import (
     migrate_refined_adam,
@@ -38,6 +39,7 @@ from aegir.trainer import (
     configure_emitter_optimization,
     constrain_emitter_scales,
     curriculum_lrs,
+    full_view_material_prior_loss,
     training_sh_proxy_weight,
 )
 
@@ -292,6 +294,32 @@ def test_default_transport_budget_is_2_pow_16_rays() -> None:
     assert primary_points * samples_per_point == 65_536
     assert _factor_patch_shape(primary_points, 128, 128) == (16, 16)
     assert config.render.bounce_chunk_size == 65_536
+
+
+def test_material_prior_supervises_pixels_outside_transport_patch() -> None:
+    albedo = torch.zeros((8, 8, 3), requires_grad=True)
+    prior = torch.zeros_like(albedo)
+    prior[4:, 4:] = 1.0
+    mask = torch.ones((8, 8, 1), dtype=torch.bool)
+
+    # A hypothetical top-left transport patch contains no material error.
+    patch_loss = material_prior_loss(
+        {"albedo": albedo[:2, :2]},
+        {"albedo": prior[:2, :2]},
+        AEGIRConfig().losses,
+        mask[:2, :2],
+    )
+    full_loss = full_view_material_prior_loss(
+        {"albedo": albedo},
+        {"albedo": prior},
+        AEGIRConfig().losses,
+        mask,
+    )
+
+    assert patch_loss.item() == 0.0
+    assert full_loss.item() > 0.0
+    full_loss.backward()
+    assert torch.count_nonzero(albedo.grad[4:, 4:]) > 0
 
 
 def test_thin_emitter_seed_floor_is_two_per_mille_of_scene_diagonal() -> None:

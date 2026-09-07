@@ -34,7 +34,7 @@ still-unfixed transport/training differences recorded in
 comparison only. Do not resume them, report them as final paper reproduction,
 or mix their metrics with future production runs.
 
-Exact training resume now requires a trainer-produced v10 checkpoint with
+Exact training resume now requires a trainer-produced v11 checkpoint with
 `training_state`, frozen DN full SH, SH-to-explicit-NEE transport state, and
 screen-gradient/visibility statistics for DN-style scene splitting. V10 adds
 split albedo/material optimizer groups and initialized emitter scale anchors;

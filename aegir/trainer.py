@@ -19,7 +19,7 @@ from .checkpoint import (
     save_checkpoint,
 )
 from .color import apply_ldr_pipeline, configure_ldr_fallback, display_srgb, hdr_log_image
-from .config import AEGIRConfig, config_from_dict
+from .config import AEGIRConfig, LossWeights, config_from_dict
 from .data import MultiViewSceneDataset
 from .emitters import AreaEmitterModel
 from .gaussian_scene import GaussianMaterialBackend
@@ -112,6 +112,24 @@ def training_sh_proxy_weight(config: AEGIRConfig, step: int) -> float:
     if step >= cfg.freeze_end:
         return 0.0
     return 1.0 - (step - cfg.freeze_start) / max(1, cfg.freeze_end - cfg.freeze_start)
+
+
+def full_view_material_prior_loss(
+    gbuffer: dict[str, Tensor],
+    priors: dict[str, Tensor],
+    weights: LossWeights,
+    mask: Tensor,
+) -> Tensor:
+    """Supervise cheap rasterized materials over the complete training view."""
+
+    material_maps = {
+        key: gbuffer[key]
+        for key in ("albedo", "roughness", "metallic")
+        if key in gbuffer
+    }
+    if not material_maps:
+        raise KeyError("G-buffer contains no material maps")
+    return material_prior_loss(material_maps, priors, weights, mask)
 
 
 def _factor_patch_shape(rays_per_step: int, height: int, width: int) -> tuple[int, int]:
@@ -339,10 +357,9 @@ class SharedGaussianTrainer:
                 self.config.losses.focus_lambda,
                 mask=loss_mask,
             )
-            patch, patch_target, patch_priors, patch_mask, patch_focus = self._select_patch(
+            patch, patch_target, patch_mask, patch_focus = self._select_patch(
                 full_gbuffer,
                 photo_target,
-                priors,
                 loss_mask,
                 full_focus,
                 step,
@@ -382,7 +399,15 @@ class SharedGaussianTrainer:
                     focus_weights=patch_focus,
                     saturation_threshold=self.config.color.ldr_saturation_threshold,
                 )
-            prior = material_prior_loss(rendered, patch_priors, self.config.losses, patch_mask)
+            # Material maps require only differentiable Gaussian rasterization,
+            # not the expensive BRDF/visibility transport. Supervise the full
+            # view while keeping photometric transport on the sampled patch.
+            prior = full_view_material_prior_loss(
+                full_gbuffer,
+                priors,
+                self.config.losses,
+                loss_mask,
+            )
             tv = edge_aware_tv(
                 {key: full_gbuffer[key] for key in ("albedo", "roughness", "metallic")},
                 tv_target,
@@ -490,11 +515,10 @@ class SharedGaussianTrainer:
         self,
         gbuffer: dict[str, Tensor],
         target: Tensor,
-        priors: dict[str, Tensor],
         mask: Tensor,
         focus_weights: Tensor,
         step: int,
-    ) -> tuple[dict[str, Tensor], Tensor, dict[str, Tensor], Tensor, Tensor]:
+    ) -> tuple[dict[str, Tensor], Tensor, Tensor, Tensor]:
         height, width = target.shape[:2]
         patch_h, patch_w = _factor_patch_shape(
             self.config.training.rays_per_step,
@@ -511,11 +535,9 @@ class SharedGaussianTrainer:
             for key, value in gbuffer.items()
             if value.ndim >= 2 and value.shape[:2] == (height, width)
         }
-        selected_priors = {key: value[ys, xs] for key, value in priors.items()}
         return (
             selected,
             target[ys, xs],
-            selected_priors,
             mask[ys, xs],
             focus_weights[ys, xs],
         )
@@ -703,6 +725,7 @@ class SharedGaussianTrainer:
             "sampling": {
                 "view": "global_step_mod_dataset_length",
                 "patch": "cpu_generator_seeded_by_global_step",
+                "material_prior": "full_view",
                 "transport": "global_torch_device_rng",
             },
             "observation": {

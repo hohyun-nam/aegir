@@ -30,7 +30,7 @@ splits high-gradient large surfels, duplicates high-gradient small surfels, and
 culls only opacity below 0.005. Large surfels are never deleted without children.
 Geometry, material, frozen SH, and both Adam optimizers are migrated together;
 survivor moments are preserved and child moments start at zero. Older checkpoints
-remain inspectable but are not exact-resumable under current v10 semantics.
+remain inspectable but are not exact-resumable under current v11 semantics.
 
 ## DN-Splatter and SH
 

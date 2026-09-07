@@ -67,8 +67,12 @@ Effective from 2026-09-07:
 - Albedo uses a dedicated Adam parameter group with initial LR `3e-3`.
   Roughness and metallic retain their shared `1e-3` LR. Both groups follow the
   same 5K-15K linear decay-to-zero curriculum.
-- Checkpoint v10 stores the initialization-relative emitter scale anchors and
-  both material optimizer groups so exact resume preserves these semantics.
+- Material prior L1 supervision uses all valid pixels in the rasterized view.
+  The expensive BRDF, visibility, and indirect-light transport remains limited
+  to the 256-primary-point patch and therefore retains the paper ray budget.
+- Checkpoint v11 stores the initialization-relative emitter scale anchors and
+  both material optimizer groups, and identifies the full-view material-prior
+  objective for exact resume.
 
 The Conference wrapper exposes these settings as `ALBEDO_LR`,
 `OPTIMIZE_EMITTER_CENTERS`, `OPTIMIZE_EMITTER_ROTATIONS`,
@@ -77,6 +81,32 @@ The Conference wrapper exposes these settings as `ALBEDO_LR`,
 `EMITTER_ADAPTATION`.
 
 ## Chronological changes
+
+### 2026-09-07 — Full-view material-prior supervision
+
+Problem observed:
+
+- The renderer rasterized a complete G-buffer but cropped the DiffusionRenderer
+  albedo, roughness, and metallic priors to the same 16x16 patch used for
+  expensive lighting transport.
+- With 191 Conference views and material learning frozen after step 15K, many
+  Gaussians received sparse prior gradients while full-view TV continued to
+  smooth their materials. Neutral-initialized albedo consequently retained a
+  compressed gray dynamic range, especially on dark objects.
+- The AEGIR paper specifies `2^16` transport rays per iteration and an L1 loss
+  between rendered G-buffer maps and diffusion priors, but does not require
+  cropping the material-prior objective to the transport patch.
+
+Implementation:
+
+- Albedo, roughness, and metallic L1 prior losses now use every valid pixel in
+  the already-rasterized full view.
+- BRDF sampling, explicit-light sampling, visibility tracing, secondary-bounce
+  transport, and photometric loss remain on the 256-primary-point patch. The
+  expensive transport-ray budget is unchanged.
+- Checkpoint format v11 distinguishes the new training objective. V1-v10 remain
+  loadable for inference or explicit warm starts but cannot exact-resume under
+  the full-view material objective.
 
 ### 2026-09-07 — Blender render-frustum intrinsics correction
 

@@ -40,7 +40,7 @@ is not required by the shared-Gaussian implementation.
 - differentiable explicit-emitter NEE at the first IRGS hit, cross-faded 0-to-1
   over steps 5K-15K and used exclusively after step 15K and at inference; no SH fallback
 - shared checkpoint containing all Gaussian geometry and BRDF tensors
-- exact-resume v10 checkpoint containing frozen full SH, six-axis emission,
+- exact-resume v11 checkpoint containing frozen full SH, six-axis emission,
   emitter scale anchors, and geometry/material/emitter Adam states,
   Python/NumPy/CPU/CUDA RNG states, next global step, fixed bounds and surface
   anchors, frame identity, emitter-adaptation state, and accumulated scene-refinement state

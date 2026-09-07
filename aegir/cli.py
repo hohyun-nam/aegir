@@ -31,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--resume",
         type=Path,
         default=None,
-        help="resume an exact-resume v10 checkpoint; checkpoint config remains authoritative",
+        help="resume an exact-resume v11 checkpoint; checkpoint config remains authoritative",
     )
     train.add_argument("--output", type=Path, required=True)
     train.add_argument("--device", default="cuda")
