@@ -31,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--resume",
         type=Path,
         default=None,
-        help="resume an exact-resume v9 checkpoint; checkpoint config remains authoritative",
+        help="resume an exact-resume v10 checkpoint; checkpoint config remains authoritative",
     )
     train.add_argument("--output", type=Path, required=True)
     train.add_argument("--device", default="cuda")
@@ -41,11 +41,17 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--max-gaussians", type=int, default=None)
     train.add_argument("--max-emitters", type=int, default=16)
     train.add_argument("--geometry-lr", type=float, default=1.0e-5)
+    train.add_argument(
+        "--albedo-lr",
+        type=float,
+        default=3.0e-3,
+        help="albedo-only learning rate; roughness/metallic use --material-lr",
+    )
     train.add_argument("--material-lr", type=float, default=1.0e-3)
     train.add_argument(
         "--albedo-initialization",
         choices=("sh_dc", "neutral"),
-        default="sh_dc",
+        default="neutral",
         help="initialize physical albedo from DN SH DC or a uniform linear gray",
     )
     train.add_argument(
@@ -56,6 +62,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train.add_argument("--emitter-lr", type=float, default=1.0e-3)
     train.add_argument("--emitter-final-lr", type=float, default=1.0e-4)
+    train.add_argument(
+        "--optimize-emitter-centers",
+        action="store_true",
+        help="optimize emitter centers instead of fixing their initialized positions",
+    )
+    train.add_argument(
+        "--optimize-emitter-rotations",
+        action="store_true",
+        help="optimize emitter rotations instead of fixing their initialized orientations",
+    )
+    train.add_argument(
+        "--freeze-emitter-scales",
+        action="store_true",
+        help="fix emitter scales as well as center/rotation",
+    )
+    train.add_argument(
+        "--unconstrained-emitter-scales",
+        action="store_true",
+        help="allow learned scales outside the configured initialization-relative bounds",
+    )
+    train.add_argument("--emitter-scale-min-ratio", type=float, default=0.1)
+    train.add_argument("--emitter-scale-max-ratio", type=float, default=1.0)
+    train.add_argument(
+        "--enable-emitter-adaptation",
+        action="store_true",
+        help="enable the historical emitter split/prune schedule",
+    )
     train.add_argument("--freeze-start", type=int, default=5_000)
     train.add_argument("--freeze-end", type=int, default=15_000)
     train.add_argument("--checkpoint-every", type=int, default=5_000)
@@ -231,15 +264,23 @@ def main() -> None:
         config.training.steps = args.steps
         config.raster.image_size = args.image_size
         config.training.geometry_lr = args.geometry_lr
+        config.training.albedo_lr = args.albedo_lr
         config.training.material_lr = args.material_lr
         config.training.albedo_initialization = args.albedo_initialization
         config.training.neutral_albedo = args.neutral_albedo
         config.training.emitter_lr = args.emitter_lr
         config.training.emitter_final_lr = args.emitter_final_lr
+        config.training.optimize_emitter_centers = args.optimize_emitter_centers
+        config.training.optimize_emitter_rotations = args.optimize_emitter_rotations
+        config.training.optimize_emitter_scales = not args.freeze_emitter_scales
+        config.training.constrain_emitter_scales = not args.unconstrained_emitter_scales
+        config.training.emitter_scale_min_ratio = args.emitter_scale_min_ratio
+        config.training.emitter_scale_max_ratio = args.emitter_scale_max_ratio
         config.training.freeze_start = args.freeze_start
         config.training.freeze_end = args.freeze_end
         config.training.checkpoint_every = args.checkpoint_every
         config.adaptive.max_emitters = args.max_emitters
+        config.adaptive.enabled = args.enable_emitter_adaptation
         config.render.num_brdf_samples = args.num_brdf_samples
         config.render.num_light_samples = args.num_light_samples
         config.render.num_bounce_samples = args.num_bounce_samples

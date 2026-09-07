@@ -38,18 +38,69 @@ from .scene_culling import migrate_refined_adam, refine_scene_gaussians, should_
 from .visibility import scene_scale_from_bounds
 
 
-def curriculum_lrs(config: AEGIRConfig, step: int) -> tuple[float, float, float]:
+def curriculum_lrs(config: AEGIRConfig, step: int) -> tuple[float, float, float, float]:
     cfg = config.training
     if step < cfg.freeze_start:
-        return cfg.geometry_lr, cfg.material_lr, cfg.emitter_lr
+        return cfg.geometry_lr, cfg.albedo_lr, cfg.material_lr, cfg.emitter_lr
     if step <= cfg.freeze_end:
         t = (step - cfg.freeze_start) / max(1, cfg.freeze_end - cfg.freeze_start)
         return (
             cfg.geometry_lr * (1.0 - t),
+            cfg.albedo_lr * (1.0 - t),
             cfg.material_lr * (1.0 - t),
             cfg.emitter_lr * (1.0 - t) + cfg.emitter_final_lr * t,
         )
-    return 0.0, 0.0, cfg.emitter_final_lr
+    return 0.0, 0.0, 0.0, cfg.emitter_final_lr
+
+
+def configure_emitter_optimization(
+    emitters: AreaEmitterModel,
+    config: AEGIRConfig,
+) -> list[torch.nn.Parameter]:
+    """Apply the configured emitter freeze policy and return trainable tensors."""
+
+    training = config.training
+    trainable = {
+        "centers": training.optimize_emitter_centers,
+        "raw_quaternions": training.optimize_emitter_rotations,
+        "log_scales": training.optimize_emitter_scales,
+        "log_colors": True,
+        "log_axis_gains": True,
+        "log_spreads": True,
+        "log_falloff_powers": True,
+    }
+    parameters = []
+    for name, parameter in emitters.named_parameters():
+        parameter.requires_grad_(trainable[name])
+        if trainable[name]:
+            parameters.append(parameter)
+    return parameters
+
+
+@torch.no_grad()
+def constrain_emitter_scales(
+    emitters: AreaEmitterModel,
+    anchors: Tensor,
+    config: AEGIRConfig,
+) -> None:
+    """Clamp physical emitter radii to configured ratios of their seed radii."""
+
+    training = config.training
+    if not training.optimize_emitter_scales or not training.constrain_emitter_scales:
+        return
+    if anchors.shape != emitters.log_scales.shape:
+        raise ValueError("emitter scale-anchor shape differs from the current emitters")
+    if training.emitter_scale_min_ratio <= 0.0:
+        raise ValueError("emitter_scale_min_ratio must be positive")
+    if training.emitter_scale_max_ratio < training.emitter_scale_min_ratio:
+        raise ValueError("emitter_scale_max_ratio must be at least emitter_scale_min_ratio")
+    lower = (anchors.to(emitters.log_scales) * training.emitter_scale_min_ratio).clamp_min(
+        emitters.min_scale
+    )
+    upper = (anchors.to(emitters.log_scales) * training.emitter_scale_max_ratio).clamp_max(
+        emitters.max_scale
+    )
+    emitters.log_scales.data.clamp_(lower.log(), upper.log())
 
 
 def training_sh_proxy_weight(config: AEGIRConfig, step: int) -> float:
@@ -150,6 +201,13 @@ class SharedGaussianTrainer:
         self.scene_scale = scene_scale_from_bounds(self.bounds)
         self.scene.sanitize_parameters(self.bounds)
         self.emitters.sanitize_parameters(self.bounds)
+        self.emitter_scale_anchors = self.emitters.scales.detach().clone()
+        emitter_parameters = configure_emitter_optimization(self.emitters, config)
+        constrain_emitter_scales(
+            self.emitters,
+            self.emitter_scale_anchors,
+            self.config,
+        )
         self.visibility_tracer = (
             IRGSVisibilityTracer(scene, config.render, scene_scale=self.scene_scale)
             if config.render.point_visibility
@@ -170,9 +228,23 @@ class SharedGaussianTrainer:
             scene.geometry_parameters(), lr=config.training.geometry_lr
         )
         self.material_optimizer = torch.optim.Adam(
-            scene.material_parameters(), lr=config.training.material_lr
+            [
+                {
+                    "params": scene.albedo_parameters(),
+                    "lr": config.training.albedo_lr,
+                    "name": "albedo",
+                },
+                {
+                    "params": scene.non_albedo_material_parameters(),
+                    "lr": config.training.material_lr,
+                    "name": "roughness_metallic",
+                },
+            ]
         )
-        self.emitter_optimizer = torch.optim.Adam(emitters.parameters(), lr=config.training.emitter_lr)
+        self.emitter_optimizer = torch.optim.Adam(
+            emitter_parameters,
+            lr=config.training.emitter_lr,
+        )
         self.observation_policy = configure_ldr_fallback(
             dataset.observation_policy,
             tone_mapper=config.color.ldr_fallback_tone_mapper,
@@ -340,6 +412,11 @@ class SharedGaussianTrainer:
                 self.log_exposure.data.clamp_(-8.0, 8.0)
             self.scene.sanitize_parameters(self.bounds)
             self.emitters.sanitize_parameters(self.bounds)
+            constrain_emitter_scales(
+                self.emitters,
+                self.emitter_scale_anchors,
+                self.config,
+            )
             self._refine_scene_if_due(step + 1)
 
             if step % 25 == 0 or step == steps - 1:
@@ -352,8 +429,9 @@ class SharedGaussianTrainer:
                     "tv": float(tv.detach().cpu()),
                     "light": float(light.detach().cpu()),
                     "geometry_lr": lrs[0],
-                    "material_lr": lrs[1],
-                    "emitter_lr": lrs[2],
+                    "albedo_lr": lrs[1],
+                    "material_lr": lrs[2],
+                    "emitter_lr": lrs[3],
                     "sh_proxy_weight": sh_proxy_weight,
                     "explicit_bounce_weight": (
                         1.0 - sh_proxy_weight if self.config.render.indirect_bounce else 0.0
@@ -394,6 +472,13 @@ class SharedGaussianTrainer:
                         self.emitters,
                         adaptation,
                     )
+                    old_anchors = self.emitter_scale_anchors
+                    self.emitter_scale_anchors = old_anchors[
+                        adaptation.new_to_old.to(old_anchors.device)
+                    ].clone()
+                    self.emitter_scale_anchors[adaptation.child_mask] = self.emitters.scales.detach()[
+                        adaptation.child_mask
+                    ]
 
             checkpoint_every = self.config.training.checkpoint_every
             if checkpoint_every > 0 and (step + 1) % checkpoint_every == 0:
@@ -553,16 +638,22 @@ class SharedGaussianTrainer:
         self.xy_grad_vis_counts = torch.zeros_like(self.max_2d_size)
         self.refinement_observations = 0
 
-    def _update_lrs(self, step: int) -> tuple[float, float, float]:
-        geometry_lr, material_lr, emitter_lr = curriculum_lrs(self.config, step)
+    def _update_lrs(self, step: int) -> tuple[float, float, float, float]:
+        geometry_lr, albedo_lr, material_lr, emitter_lr = curriculum_lrs(self.config, step)
         self.geometry_optimizer.param_groups[0]["lr"] = geometry_lr
-        self.material_optimizer.param_groups[0]["lr"] = material_lr
+        self.material_optimizer.param_groups[0]["lr"] = albedo_lr
+        self.material_optimizer.param_groups[1]["lr"] = material_lr
         self.emitter_optimizer.param_groups[0]["lr"] = emitter_lr
-        return geometry_lr, material_lr, emitter_lr
+        return geometry_lr, albedo_lr, material_lr, emitter_lr
 
     def _should_adapt(self, step: int) -> bool:
         cfg = self.config.training
-        return cfg.freeze_start <= step <= cfg.freeze_end and step > 0 and step % cfg.adaptive_every == 0
+        return (
+            self.config.adaptive.enabled
+            and cfg.freeze_start <= step <= cfg.freeze_end
+            and step > 0
+            and step % cfg.adaptive_every == 0
+        )
 
     def _save(self, step: int, path: Path) -> None:
         save_checkpoint(
@@ -598,6 +689,9 @@ class SharedGaussianTrainer:
             "rng": capture_rng_state(self.device),
             "bounds": [value.detach().cpu().clone() for value in self.bounds],
             "surface_points": self.surface_points.detach().cpu().clone(),
+            "emitter_optimization": {
+                "scale_anchors": self.emitter_scale_anchors.detach().cpu().clone(),
+            },
             "adaptation": dict(self.adaptation_state),
             "scene_culling": {
                 "state": dict(self.scene_culling_state),
@@ -629,6 +723,10 @@ class SharedGaussianTrainer:
         self.material_optimizer.load_state_dict(optimizers["material"])
         self.emitter_optimizer.load_state_dict(optimizers["emitter"])
         self.surface_points = training_state["surface_points"].to(self.device)
+        emitter_optimization = training_state["emitter_optimization"]
+        self.emitter_scale_anchors = emitter_optimization["scale_anchors"].to(self.device)
+        if self.emitter_scale_anchors.shape != self.emitters.log_scales.shape:
+            raise ValueError("resume emitter scale anchors differ from the emitter count")
         self.adaptation_state = dict(training_state["adaptation"])
         scene_culling = training_state.get("scene_culling")
         if scene_culling is not None:

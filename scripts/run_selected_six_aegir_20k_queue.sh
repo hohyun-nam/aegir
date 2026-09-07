@@ -175,6 +175,7 @@ assert payload["format"] in {
     "aegir_shared_gaussian_v7",
     "aegir_shared_gaussian_v8",
     "aegir_shared_gaussian_v9",
+    "aegir_shared_gaussian_v10",
 }
 assert payload["step"] == 20000
 assert payload["training_state"]["next_step"] == 20000
@@ -185,10 +186,15 @@ if payload["format"] in {
     "aegir_shared_gaussian_v7",
     "aegir_shared_gaussian_v8",
     "aegir_shared_gaussian_v9",
+    "aegir_shared_gaussian_v10",
 }:
     assert payload["config"]["scene_culling"]["enabled"] is True
     assert "scene_culling" in payload["training_state"]
-if payload["format"] in {"aegir_shared_gaussian_v8", "aegir_shared_gaussian_v9"}:
+if payload["format"] in {
+    "aegir_shared_gaussian_v8",
+    "aegir_shared_gaussian_v9",
+    "aegir_shared_gaussian_v10",
+}:
     refinement = payload["training_state"]["scene_culling"]
     assert "xy_grad_norm" in refinement
     assert "xy_grad_vis_counts" in refinement

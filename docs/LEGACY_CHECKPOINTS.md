@@ -34,14 +34,15 @@ still-unfixed transport/training differences recorded in
 comparison only. Do not resume them, report them as final paper reproduction,
 or mix their metrics with future production runs.
 
-Exact training resume now requires a trainer-produced v9 checkpoint with
+Exact training resume now requires a trainer-produced v10 checkpoint with
 `training_state`, frozen DN full SH, SH-to-explicit-NEE transport state, and
-screen-gradient/visibility statistics for DN-style scene splitting. V9 adds
-the learned six-axis emitter parameter and its Adam state. Formats v5-v8 remain
+screen-gradient/visibility statistics for DN-style scene splitting. V10 adds
+split albedo/material optimizer groups and initialized emitter scale anchors;
+v9 added the learned six-axis emitter parameter and its Adam state. Formats v5-v9 remain
 loadable, but exact resume is deliberately rejected because their
 training/emitter semantics differ. Formats v1-v3 lack optimizer/RNG/global-step
 state, while v4 lacks full SH state and uses the superseded secondary-bounce
-algorithm. Formats v1-v8 are therefore inspection/inference or explicit-warm-start
+algorithm. Formats v1-v9 are therefore inspection/inference or explicit-warm-start
 only under current code.
 Being deserializable does not make an old checkpoint resumable.
 

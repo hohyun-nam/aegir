@@ -88,9 +88,21 @@ class ColorConfig:
 class TrainingConfig:
     steps: int = 20_000
     geometry_lr: float = 1.0e-5
+    # Albedo starts from a neutral gray in the current decomposition setup and
+    # therefore gets its own faster optimizer group. Roughness and metallic
+    # continue to use ``material_lr``.
+    albedo_lr: float = 3.0e-3
     material_lr: float = 1.0e-3
     emitter_lr: float = 1.0e-3
     emitter_final_lr: float = 1.0e-4
+    # Keep the initialized light proxy attached to the detected fixture. Scale
+    # may shrink, but cannot grow beyond its initialized extent by default.
+    optimize_emitter_centers: bool = False
+    optimize_emitter_rotations: bool = False
+    optimize_emitter_scales: bool = True
+    constrain_emitter_scales: bool = True
+    emitter_scale_min_ratio: float = 0.1
+    emitter_scale_max_ratio: float = 1.0
     freeze_start: int = 5_000
     freeze_end: int = 15_000
     adaptive_every: int = 1_000
@@ -102,7 +114,7 @@ class TrainingConfig:
     # ``sh_dc`` preserves the historical appearance-based seed. ``neutral``
     # starts every Gaussian from a scene-linear gray reflectance instead, so
     # source-light shadows/highlights are not copied into physical albedo.
-    albedo_initialization: str = "sh_dc"
+    albedo_initialization: str = "neutral"
     neutral_albedo: float = 0.5
     emitter_init_score: str = "hdr"
     emitter_init_quantile: float = 0.995
@@ -118,6 +130,10 @@ class TrainingConfig:
 
 @dataclass(slots=True)
 class AdaptiveConfig:
+    # Split/prune changes emitter identity and geometry. It is disabled in the
+    # current light-separation setup; enable it explicitly for the historical
+    # AEGIR adaptive-emitter baseline.
+    enabled: bool = False
     prune_energy: float = 0.1
     split_energy: float = 5.0
     split_scale_fraction: float = 0.2

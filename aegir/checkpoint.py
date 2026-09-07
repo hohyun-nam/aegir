@@ -13,7 +13,7 @@ from .config import AEGIRConfig
 from .emitters import AreaEmitterModel
 from .gaussian_scene import GaussianMaterialBackend, planarize_gaussians
 
-CHECKPOINT_FORMAT = "aegir_shared_gaussian_v9"
+CHECKPOINT_FORMAT = "aegir_shared_gaussian_v10"
 SUPPORTED_CHECKPOINT_FORMATS = {
     "aegir_shared_gaussian_v1",
     "aegir_shared_gaussian_v2",
@@ -23,6 +23,7 @@ SUPPORTED_CHECKPOINT_FORMATS = {
     "aegir_shared_gaussian_v6",
     "aegir_shared_gaussian_v7",
     "aegir_shared_gaussian_v8",
+    "aegir_shared_gaussian_v9",
     CHECKPOINT_FORMAT,
 }
 EXACT_RESUME_FORMATS = {CHECKPOINT_FORMAT}
@@ -99,8 +100,8 @@ def require_exact_resume_state(payload: dict[str, Any], path: str | Path | None 
     if payload.get("format") not in EXACT_RESUME_FORMATS or "training_state" not in payload:
         raise ValueError(
             f"checkpoint{location} has no exact-resume optimizer/RNG state; "
-            "only v9 checkpoints contain optimizer state for the learned six-axis "
-            "emission parameters; v1-v8 are inference-only or explicit warm starts"
+            "only v10 checkpoints contain optimizer state for the split albedo LR and "
+            "constrained emitter geometry; v1-v9 are inference-only or explicit warm starts"
         )
     training_state = payload["training_state"]
     required = {
@@ -116,6 +117,11 @@ def require_exact_resume_state(payload: dict[str, Any], path: str | Path | None 
     if missing:
         raise ValueError(f"checkpoint{location} is missing exact-resume fields: {missing}")
     if payload.get("format") == CHECKPOINT_FORMAT:
+        emitter_optimization = training_state.get("emitter_optimization")
+        if emitter_optimization is None or "scale_anchors" not in emitter_optimization:
+            raise ValueError(
+                f"checkpoint{location} is missing constrained-emitter resume state"
+            )
         refinement = training_state.get("scene_culling")
         if refinement is None:
             raise ValueError(f"checkpoint{location} is missing scene-refinement resume state")

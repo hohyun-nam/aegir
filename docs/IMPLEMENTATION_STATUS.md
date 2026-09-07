@@ -22,11 +22,14 @@ is not required by the shared-Gaussian implementation.
 - training/evaluation share the same LDR transform, and raw float HDR/metric
   arrays remain separate from display PNGs
 - HDR bright-region, multi-view-persistent DBSCAN/PCA emitter initialization
-- separate geometry, material, and emitter Adam optimizers
+- separate geometry, material, and emitter Adam optimizers, with dedicated
+  albedo (`3e-3`) and roughness/metallic (`1e-3`) parameter groups
 - paper 0-5K / 5-15K / 15-20K learning-rate curriculum
 - full-view, validity-aware focus-map computation followed by exact training-patch crop
-- emitter adaptive split/prune without resetting scene or survivor-emitter Adam
-  momentum; new child moment rows start at zero while sharing Adam's tensor-level step
+- current default emitter optimization fixes initialized center/rotation,
+  constrains scale to `0.1x-1.0x` of its seed, and disables split/prune while
+  learning RGB, six-axis gains, spread, and falloff; historical adaptive
+  split/prune remains opt-in
 - DN-style scene-Gaussian refinement: after warm-up and full training-view
   statistics coverage, remove only opacity below 0.005; replace high-gradient
   large Gaussians with two smaller children and duplicate high-gradient small
@@ -37,11 +40,12 @@ is not required by the shared-Gaussian implementation.
 - differentiable explicit-emitter NEE at the first IRGS hit, cross-faded 0-to-1
   over steps 5K-15K and used exclusively after step 15K and at inference; no SH fallback
 - shared checkpoint containing all Gaussian geometry and BRDF tensors
-- exact-resume v9 checkpoint containing frozen full SH, six-axis emission, and geometry/material/emitter Adam states,
+- exact-resume v10 checkpoint containing frozen full SH, six-axis emission,
+  emitter scale anchors, and geometry/material/emitter Adam states,
   Python/NumPy/CPU/CUDA RNG states, next global step, fixed bounds and surface
   anchors, frame identity, emitter-adaptation state, and accumulated scene-refinement state
 - `train-gaussian-scene --resume` restarts at the saved global step without
-  replaying learning-rate, adaptation, or refinement schedules; v1-v8 remain inference-only
+  replaying learning-rate, adaptation, or refinement schedules; v1-v9 remain inference-only
 - all-view inspection by re-rasterization
 - checkpointed pre-training emitter state and automatic initial/final emitter
   comparison in world and camera views

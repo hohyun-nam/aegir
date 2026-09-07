@@ -16,10 +16,18 @@ BOUNCE_SAMPLES="${BOUNCE_SAMPLES:-8}"
 RASTER_SIZE="${RASTER_SIZE:-256}"
 GEOMETRY_LR="${GEOMETRY_LR:-0.0}"
 SCENE_CULLING="${SCENE_CULLING:-0}"
-ALBEDO_INITIALIZATION="${ALBEDO_INITIALIZATION:-sh_dc}"
+ALBEDO_INITIALIZATION="${ALBEDO_INITIALIZATION:-neutral}"
 NEUTRAL_ALBEDO="${NEUTRAL_ALBEDO:-0.5}"
+ALBEDO_LR="${ALBEDO_LR:-0.003}"
 SIX_AXIS_EMISSION="${SIX_AXIS_EMISSION:-1}"
 EMITTER_AXIS_LOBE_SHARPNESS="${EMITTER_AXIS_LOBE_SHARPNESS:-12.0}"
+OPTIMIZE_EMITTER_CENTERS="${OPTIMIZE_EMITTER_CENTERS:-0}"
+OPTIMIZE_EMITTER_ROTATIONS="${OPTIMIZE_EMITTER_ROTATIONS:-0}"
+OPTIMIZE_EMITTER_SCALES="${OPTIMIZE_EMITTER_SCALES:-1}"
+CONSTRAIN_EMITTER_SCALES="${CONSTRAIN_EMITTER_SCALES:-1}"
+EMITTER_SCALE_MIN_RATIO="${EMITTER_SCALE_MIN_RATIO:-0.1}"
+EMITTER_SCALE_MAX_RATIO="${EMITTER_SCALE_MAX_RATIO:-1.0}"
+EMITTER_ADAPTATION="${EMITTER_ADAPTATION:-0}"
 CHECKPOINT="$OUTPUT_ROOT/aegir_20k.pt"
 INSPECT_ROOT="$OUTPUT_ROOT/inspect_compare30"
 LOG="$OUTPUT_ROOT/train_inspect.log"
@@ -51,14 +59,23 @@ if [[ "$SIX_AXIS_EMISSION" != "0" && "$SIX_AXIS_EMISSION" != "1" ]]; then
   echo "SIX_AXIS_EMISSION must be 0 or 1" >&2
   exit 1
 fi
+for flag in OPTIMIZE_EMITTER_CENTERS OPTIMIZE_EMITTER_ROTATIONS OPTIMIZE_EMITTER_SCALES CONSTRAIN_EMITTER_SCALES EMITTER_ADAPTATION; do
+  if [[ "${!flag}" != "0" && "${!flag}" != "1" ]]; then
+    echo "$flag must be 0 or 1" >&2
+    exit 1
+  fi
+done
 if (( RASTER_SIZE <= 0 )); then
   echo "RASTER_SIZE must be positive" >&2
   exit 1
 fi
 
 export GEOMETRY DATA PRIORS CHECKPOINT BOUNCE_SAMPLES RASTER_SIZE GEOMETRY_LR SCENE_CULLING
-export ALBEDO_INITIALIZATION NEUTRAL_ALBEDO
+export ALBEDO_INITIALIZATION NEUTRAL_ALBEDO ALBEDO_LR
 export SIX_AXIS_EMISSION EMITTER_AXIS_LOBE_SHARPNESS
+export OPTIMIZE_EMITTER_CENTERS OPTIMIZE_EMITTER_ROTATIONS OPTIMIZE_EMITTER_SCALES
+export CONSTRAIN_EMITTER_SCALES EMITTER_SCALE_MIN_RATIO EMITTER_SCALE_MAX_RATIO
+export EMITTER_ADAPTATION
 
 mkdir -p "$OUTPUT_ROOT" "$CUDA_STUBS" "$TORCH_EXTENSIONS_DIR"
 exec > >(tee -a "$LOG") 2>&1
@@ -67,7 +84,8 @@ cd "$AEGIR_ROOT"
 echo "$(date --iso-8601=seconds) conference geometry-configurable AEGIR"
 echo "geometry: $GEOMETRY"
 echo "checkpoint: $CHECKPOINT"
-echo "geometry_lr=$GEOMETRY_LR scene_culling=$SCENE_CULLING raster_size=$RASTER_SIZE origin_offset=0.15 bounce_samples=$BOUNCE_SAMPLES albedo_initialization=$ALBEDO_INITIALIZATION neutral_albedo=$NEUTRAL_ALBEDO six_axis_emission=$SIX_AXIS_EMISSION axis_lobe_sharpness=$EMITTER_AXIS_LOBE_SHARPNESS"
+echo "geometry_lr=$GEOMETRY_LR scene_culling=$SCENE_CULLING raster_size=$RASTER_SIZE origin_offset=0.15 bounce_samples=$BOUNCE_SAMPLES albedo_initialization=$ALBEDO_INITIALIZATION neutral_albedo=$NEUTRAL_ALBEDO albedo_lr=$ALBEDO_LR six_axis_emission=$SIX_AXIS_EMISSION axis_lobe_sharpness=$EMITTER_AXIS_LOBE_SHARPNESS"
+echo "emitter_centers_trainable=$OPTIMIZE_EMITTER_CENTERS emitter_rotations_trainable=$OPTIMIZE_EMITTER_ROTATIONS emitter_scales_trainable=$OPTIMIZE_EMITTER_SCALES emitter_scale_constraint=$CONSTRAIN_EMITTER_SCALES scale_ratio=[$EMITTER_SCALE_MIN_RATIO,$EMITTER_SCALE_MAX_RATIO] emitter_adaptation=$EMITTER_ADAPTATION"
 
 if [[ ! -s "$CHECKPOINT" ]]; then
   resume=""
@@ -100,15 +118,23 @@ config = AEGIRConfig()
 config.training.steps = 20_000
 config.training.checkpoint_every = 5_000
 config.training.geometry_lr = float(os.environ["GEOMETRY_LR"])
+config.training.albedo_lr = float(os.environ["ALBEDO_LR"])
 config.training.material_lr = 1.0e-3
 config.training.albedo_initialization = os.environ["ALBEDO_INITIALIZATION"]
 config.training.neutral_albedo = float(os.environ["NEUTRAL_ALBEDO"])
 config.training.emitter_lr = 1.0e-3
 config.training.emitter_final_lr = 1.0e-4
+config.training.optimize_emitter_centers = os.environ["OPTIMIZE_EMITTER_CENTERS"] == "1"
+config.training.optimize_emitter_rotations = os.environ["OPTIMIZE_EMITTER_ROTATIONS"] == "1"
+config.training.optimize_emitter_scales = os.environ["OPTIMIZE_EMITTER_SCALES"] == "1"
+config.training.constrain_emitter_scales = os.environ["CONSTRAIN_EMITTER_SCALES"] == "1"
+config.training.emitter_scale_min_ratio = float(os.environ["EMITTER_SCALE_MIN_RATIO"])
+config.training.emitter_scale_max_ratio = float(os.environ["EMITTER_SCALE_MAX_RATIO"])
 config.training.freeze_start = 5_000
 config.training.freeze_end = 15_000
 config.raster.image_size = int(os.environ["RASTER_SIZE"])
 config.scene_culling.enabled = os.environ["SCENE_CULLING"] == "1"
+config.adaptive.enabled = os.environ["EMITTER_ADAPTATION"] == "1"
 config.render.num_brdf_samples = 128
 config.render.num_light_samples = 128
 config.render.num_bounce_samples = int(os.environ["BOUNCE_SAMPLES"])

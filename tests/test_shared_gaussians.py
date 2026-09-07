@@ -33,7 +33,13 @@ from aegir.scene_culling import (
     refine_scene_gaussians,
     should_refine_scene,
 )
-from aegir.trainer import _factor_patch_shape, curriculum_lrs, training_sh_proxy_weight
+from aegir.trainer import (
+    _factor_patch_shape,
+    configure_emitter_optimization,
+    constrain_emitter_scales,
+    curriculum_lrs,
+    training_sh_proxy_weight,
+)
 
 
 def make_export(path: Path, count: int = 4) -> None:
@@ -129,7 +135,12 @@ def test_dn_scene_refinement_splits_large_rows_and_preserves_survivor_adam(
     )
     scene.log_scales.data[1] = torch.tensor([1.2, 0.1]).log()
     geometry = torch.optim.Adam(scene.geometry_parameters(), lr=1.0e-4)
-    material = torch.optim.Adam(scene.material_parameters(), lr=2.0e-4)
+    material = torch.optim.Adam(
+        [
+            {"params": scene.albedo_parameters(), "lr": 6.0e-4},
+            {"params": scene.non_albedo_material_parameters(), "lr": 2.0e-4},
+        ]
+    )
     loss = sum(parameter.square().mean() for parameter in scene.parameters())
     loss.backward()
     geometry.step()
@@ -163,6 +174,9 @@ def test_dn_scene_refinement_splits_large_rows_and_preserves_survivor_adam(
         result.new_material_parameters,
         result,
     )
+
+    assert material.param_groups[0]["params"] == scene.albedo_parameters()
+    assert material.param_groups[1]["params"] == scene.non_albedo_material_parameters()
 
     assert result.changed
     assert result.pruned_below_opacity == 1
@@ -222,14 +236,40 @@ def test_planarization_moves_smallest_axis_to_surface_normal() -> None:
 
 def test_paper_curriculum() -> None:
     config = AEGIRConfig()
-    assert curriculum_lrs(config, 0) == (1.0e-5, 1.0e-3, 1.0e-3)
-    assert curriculum_lrs(config, 5_000) == (1.0e-5, 1.0e-3, 1.0e-3)
-    geometry, material, emitter = curriculum_lrs(config, 10_000)
+    assert curriculum_lrs(config, 0) == (1.0e-5, 3.0e-3, 1.0e-3, 1.0e-3)
+    assert curriculum_lrs(config, 5_000) == (1.0e-5, 3.0e-3, 1.0e-3, 1.0e-3)
+    geometry, albedo, material, emitter = curriculum_lrs(config, 10_000)
     assert geometry == 5.0e-6
+    assert albedo == 1.5e-3
     assert material == 5.0e-4
     assert emitter == 5.5e-4
-    assert curriculum_lrs(config, 15_000) == (0.0, 0.0, 1.0e-4)
-    assert curriculum_lrs(config, 19_999) == (0.0, 0.0, 1.0e-4)
+    assert curriculum_lrs(config, 15_000) == (0.0, 0.0, 0.0, 1.0e-4)
+    assert curriculum_lrs(config, 19_999) == (0.0, 0.0, 0.0, 1.0e-4)
+
+
+def test_default_emitter_policy_fixes_pose_and_constrains_scale() -> None:
+    config = AEGIRConfig()
+    emitters = AreaEmitterModel(
+        centers=torch.tensor([[1.0, 2.0, 3.0]]),
+        scales=torch.tensor([[2.0, 1.0, 0.5]]),
+    )
+    parameters = configure_emitter_optimization(emitters, config)
+
+    assert not emitters.centers.requires_grad
+    assert not emitters.raw_quaternions.requires_grad
+    assert emitters.log_scales.requires_grad
+    assert any(parameter is emitters.log_colors for parameter in parameters)
+    assert any(parameter is emitters.log_axis_gains for parameter in parameters)
+    assert not config.adaptive.enabled
+
+    anchors = emitters.scales.detach().clone()
+    emitters.log_scales.data.copy_((anchors * 2.0).log())
+    constrain_emitter_scales(emitters, anchors, config)
+    assert torch.allclose(emitters.scales, anchors)
+
+    emitters.log_scales.data.copy_((anchors * 0.01).log())
+    constrain_emitter_scales(emitters, anchors, config)
+    assert torch.allclose(emitters.scales, anchors * 0.1)
 
 
 def test_training_sh_proxy_fades_before_inference() -> None:

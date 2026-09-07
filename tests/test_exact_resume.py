@@ -158,6 +158,9 @@ def test_checkpoint_resume_matches_uninterrupted_training_across_split(tmp_path:
         "rng": capture_rng_state("cpu"),
         "bounds": [torch.full((3,), -2.0), torch.full((3,), 2.0)],
         "surface_points": interrupted_scene.means.detach().cpu().clone(),
+        "emitter_optimization": {
+            "scale_anchors": interrupted_emitters.scales.detach().cpu().clone(),
+        },
         "adaptation": {
             "checks": 1,
             "changes": first_adaptations,
@@ -245,7 +248,7 @@ def test_legacy_checkpoint_is_rejected_for_exact_resume(tmp_path: Path) -> None:
     payload.pop("training_state", None)
     torch.save(payload, checkpoint)
 
-    with pytest.raises(ValueError, match="only v9"):
+    with pytest.raises(ValueError, match="only v10"):
         require_exact_resume_state(payload, checkpoint)
     loaded_scene, loaded_emitters, _ = load_checkpoint(checkpoint, "cpu")
     assert loaded_scene.gaussian_count == scene.gaussian_count
@@ -263,7 +266,7 @@ def test_v6_checkpoint_is_loadable_but_not_exactly_resumable(tmp_path: Path) -> 
     payload["training_state"] = {"next_step": 3}
     torch.save(payload, checkpoint)
 
-    with pytest.raises(ValueError, match="only v9"):
+    with pytest.raises(ValueError, match="only v10"):
         require_exact_resume_state(payload, checkpoint)
     loaded_scene, loaded_emitters, _ = load_checkpoint(checkpoint, "cpu")
     assert loaded_scene.gaussian_count == scene.gaussian_count

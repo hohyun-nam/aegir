@@ -277,7 +277,9 @@ def migrate_refined_adam(
             else:
                 migrated[key] = value
         optimizer.state[new] = migrated
-    optimizer.param_groups[0]["params"] = list(new_parameters)
+    replacements = dict(zip(old_parameters, new_parameters, strict=True))
+    for group in optimizer.param_groups:
+        group["params"] = [replacements.get(parameter, parameter) for parameter in group["params"]]
     return optimizer
 
 

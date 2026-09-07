@@ -110,6 +110,8 @@ stored separately from visualization PNGs.
 
 ## Optimization schedule
 
+- physical albedo initializes to scene-linear neutral RGB `(0.5, 0.5, 0.5)`;
+  use `--albedo-initialization sh_dc` only for the historical appearance-seeded baseline
 - each iteration shades a `16 x 16` patch: 256 primary surface points
 - focus weights are computed once over the full target view with the combined
   dataset/raster validity mask, then cropped at the exact training-patch coordinates
@@ -119,14 +121,19 @@ stored separately from visualization PNGs.
   surface-to-emitter visibility segment (at most another 65,536 with the default)
 - secondary NEE uses `bounce_chunk_size=65,536` by default, avoiding hundreds
   of small OptiX launches; this execution-only value may be changed on exact resume
-- steps 0-5K: geometry `1e-5`, material `1e-3`, emitters `1e-3`
-- steps 5K-15K: geometry/material decay to zero; emitters decay to `1e-4`
+- steps 0-5K: geometry `1e-5`, albedo `3e-3`, roughness/metallic `1e-3`, emitters `1e-3`
+- steps 5K-15K: geometry/albedo/roughness/metallic decay to zero; emitters decay to `1e-4`
 - steps 15K-20K: emitters only
 - indirect transport cross-fades over steps 5K-15K from the frozen DN full-SH
   first-hit proxy to differentiable explicit-emitter next-event estimation (NEE);
   the two weights always sum to one, and steps 15K-20K use explicit NEE only
-- adaptive prune/split preserves unsplit emitter Adam state; new child moment rows
-  start at zero and share the preserved tensor-level Adam step
+- the current decomposition default fixes emitter centers and rotations, learns
+  scale only within `0.1x-1.0x` of its initialization, and disables emitter
+  split/prune; RGB, six signed-axis gains, spread, and falloff remain trainable
+- the historical adaptive-emitter baseline remains available with
+  `--optimize-emitter-centers --optimize-emitter-rotations
+  --unconstrained-emitter-scales --enable-emitter-adaptation`; adaptive
+  prune/split preserves unsplit emitter Adam state and initializes child moments at zero
 - scene Gaussians use DN-style refinement after the 500-step warm-up and only
   after statistics cover every training view: opacity `< 0.005` is culled;
   high-gradient large Gaussians are replaced by two children with scales
@@ -135,11 +142,12 @@ stored separately from visualization PNGs.
 
 ## Exact checkpoint resume
 
-Trainer-produced v9 checkpoints store frozen DN full-SH training features, the
+Trainer-produced v10 checkpoints store frozen DN full-SH training features, the
 three Adam optimizer states, Python, NumPy, CPU/CUDA RNG states, the next global
 step, fixed scene bounds and surface anchors, selected training frames, and
-emitter-adaptation plus scene-refinement gradient/visibility state. V9 also
-stores the six learned signed-axis emitter gains. Resume to a
+emitter scale anchors, adaptation, and scene-refinement gradient/visibility state.
+V10 also stores the six learned signed-axis emitter gains and the split
+albedo/material optimizer groups. Resume to a
 final global-step target with:
 
 ```bash
@@ -157,10 +165,13 @@ final global-step target with:
 training config is authoritative; resume only changes that target and the
 output path. Exact resume deliberately rejects changed DN checkpoints, dataset
 or prior paths, selected frame identities, and visible CUDA-device counts.
-Checkpoint formats v1-v8 remain loadable for inspection/inference but cannot be
+Checkpoint formats v1-v9 remain loadable for inspection/inference but cannot be
 passed to `--resume`, because their training semantics predate the current
-six-axis emitter optimizer state. `--emitter-checkpoint` is only an emitter warm start and is
+constrained-emitter and split-albedo optimizer state. `--emitter-checkpoint` is only an emitter warm start and is
 mutually exclusive with exact resume.
+
+The baseline method, local experiment defaults, and every intentional training
+change are tracked in [`docs/TRAINING_METHOD_CHANGELOG.md`](docs/TRAINING_METHOD_CHANGELOG.md).
 
 ## Held-out evaluation
 

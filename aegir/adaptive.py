@@ -51,6 +51,9 @@ def adapt_emitters(
     """
 
     old_raw_parameters = dict(emitters.named_parameters())
+    old_requires_grad = {
+        name: parameter.requires_grad for name, parameter in old_raw_parameters.items()
+    }
     state = emitters.state()
     bmin, bmax = bounds
     scene_max_extent = (bmax.to(state.scales) - bmin.to(state.scales)).abs().amax()
@@ -141,6 +144,7 @@ def adapt_emitters(
         for name, new_parameter in emitters.named_parameters():
             old_parameter = old_raw_parameters[name]
             new_parameter[survivor_mask] = old_parameter[survivor_sources]
+            new_parameter.requires_grad_(old_requires_grad[name])
     return EmitterAdaptationResult(changed, mapping, children, pruned_old_indices)
 
 
@@ -176,7 +180,10 @@ def migrate_emitter_adam(
         "decoupled_weight_decay",
     )
     adam_options = {key: old_group[key] for key in adam_keys if key in old_group}
-    new_optimizer = torch.optim.Adam(emitters.parameters(), **adam_options)
+    new_optimizer = torch.optim.Adam(
+        (parameter for parameter in emitters.parameters() if parameter.requires_grad),
+        **adam_options,
+    )
     # Retain scheduler/custom metadata such as initial_lr if present.
     for key, value in old_group.items():
         if key != "params":

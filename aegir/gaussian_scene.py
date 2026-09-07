@@ -249,6 +249,12 @@ class GaussianMaterialBackend(nn.Module):
     def material_parameters(self) -> list[nn.Parameter]:
         return [self.albedo_logits, self.roughness_logits, self.metallic_logits]
 
+    def albedo_parameters(self) -> list[nn.Parameter]:
+        return [self.albedo_logits]
+
+    def non_albedo_material_parameters(self) -> list[nn.Parameter]:
+        return [self.roughness_logits, self.metallic_logits]
+
     def bounds(self, quantile: float = 0.005) -> tuple[Tensor, Tensor]:
         means = self.means.detach()
         bmin = torch.quantile(means, quantile, dim=0)
