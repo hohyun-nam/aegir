@@ -104,14 +104,16 @@ def constrain_emitter_scales(
 
 
 def training_sh_proxy_weight(config: AEGIRConfig, step: int) -> float:
-    """Fade the frozen DN SH transport proxy during the emitter-only phase."""
+    """Finish the SH fade before material learning freezes."""
 
     cfg = config.training
-    if not config.render.indirect_bounce or step <= cfg.freeze_start:
+    if not 0 <= cfg.sh_fade_start < cfg.sh_fade_end:
+        raise ValueError("SH fade requires 0 <= sh_fade_start < sh_fade_end")
+    if not config.render.indirect_bounce or step <= cfg.sh_fade_start:
         return 1.0 if config.render.indirect_bounce else 0.0
-    if step >= cfg.freeze_end:
+    if step >= cfg.sh_fade_end:
         return 0.0
-    return 1.0 - (step - cfg.freeze_start) / max(1, cfg.freeze_end - cfg.freeze_start)
+    return 1.0 - (step - cfg.sh_fade_start) / (cfg.sh_fade_end - cfg.sh_fade_start)
 
 
 def full_view_material_prior_loss(
@@ -324,7 +326,14 @@ class SharedGaussianTrainer:
         self.scene.sanitize_parameters(self.bounds)
         self.emitters.sanitize_parameters(self.bounds)
         for step in iterator:
-            if step > 0 and self.visibility_tracer is not None:
+            # Rebuild after an actual geometry update, including the last
+            # update immediately before its LR reaches zero. A resumed trainer
+            # already built its BVH from the restored scene in __init__.
+            if (
+                step > start_step
+                and self.visibility_tracer is not None
+                and curriculum_lrs(self.config, step - 1)[0] > 0.0
+            ):
                 self.visibility_tracer.refresh_bvh()
             lrs = self._update_lrs(step)
             frame = self.dataset[step % len(self.dataset)]
@@ -402,18 +411,7 @@ class SharedGaussianTrainer:
             # Material maps require only differentiable Gaussian rasterization,
             # not the expensive BRDF/visibility transport. Supervise the full
             # view while keeping photometric transport on the sampled patch.
-            prior = full_view_material_prior_loss(
-                full_gbuffer,
-                priors,
-                self.config.losses,
-                loss_mask,
-            )
-            tv = edge_aware_tv(
-                {key: full_gbuffer[key] for key in ("albedo", "roughness", "metallic")},
-                tv_target,
-                self.config.losses,
-                loss_mask,
-            )
+            prior, tv = self._material_regularization(full_gbuffer, priors, tv_target, loss_mask)
             light = emitter_regularization(
                 self.emitters,
                 self.bounds,
@@ -550,17 +548,47 @@ class SharedGaussianTrainer:
             self.exposure_optimizer.zero_grad(set_to_none=True)
 
     def _sanitize_gradients(self) -> None:
-        parameters = [*self.scene.parameters(), *self.emitters.parameters()]
+        optimizers = [self.geometry_optimizer, self.material_optimizer, self.emitter_optimizer]
         if self.exposure_optimizer is not None:
-            parameters.append(self.log_exposure)
+            optimizers.append(self.exposure_optimizer)
+        parameters = [
+            parameter
+            for optimizer in optimizers
+            for group in optimizer.param_groups
+            if group["lr"] > 0.0
+            for parameter in group["params"]
+            if parameter.requires_grad
+        ]
         for parameter in parameters:
             if parameter.grad is not None:
                 parameter.grad.nan_to_num_(nan=0.0, posinf=0.0, neginf=0.0)
         torch.nn.utils.clip_grad_norm_(parameters, self.config.training.grad_clip)
 
+    def _material_regularization(
+        self,
+        gbuffer: dict[str, Tensor],
+        priors: dict[str, Tensor],
+        target: Tensor,
+        mask: Tensor,
+    ) -> tuple[Tensor, Tensor]:
+        # These losses depend on geometry/materials, never directly on emitters.
+        # Preserve their geometry gradients when geometry is still trainable.
+        if not any(parameter.requires_grad for parameter in self.scene.parameters()):
+            zero = target.new_zeros(())
+            return zero, zero
+        return (
+            full_view_material_prior_loss(gbuffer, priors, self.config.losses, mask),
+            edge_aware_tv(
+                {key: gbuffer[key] for key in ("albedo", "roughness", "metallic")},
+                target,
+                self.config.losses,
+                mask,
+            ),
+        )
+
     @torch.no_grad()
     def _accumulate_scene_culling_stats(self, gbuffer: dict[str, Tensor]) -> None:
-        if not self.config.scene_culling.enabled:
+        if not self.config.scene_culling.enabled or not self.scene.means.requires_grad:
             return
         radii = gbuffer["radii"].detach().float()
         if radii.shape != self.max_2d_size.shape:
@@ -575,7 +603,7 @@ class SharedGaussianTrainer:
 
     @torch.no_grad()
     def _accumulate_scene_gradient_stats(self, gbuffer: dict[str, Tensor]) -> None:
-        if not self.config.scene_culling.enabled:
+        if not self.config.scene_culling.enabled or not self.scene.means.requires_grad:
             return
         means2d = gbuffer.get("means2d")
         if means2d is None or means2d.grad is None:
@@ -593,7 +621,7 @@ class SharedGaussianTrainer:
     @torch.no_grad()
     def _refine_scene_if_due(self, completed_steps: int) -> None:
         config = self.config.scene_culling
-        if not should_refine_scene(completed_steps, config):
+        if not self.scene.means.requires_grad or not should_refine_scene(completed_steps, config):
             return
         # Match DN-Splatter's requirement that refinement statistics cover all
         # training cameras instead of acting on a short, view-biased window.
@@ -666,6 +694,13 @@ class SharedGaussianTrainer:
         self.material_optimizer.param_groups[0]["lr"] = albedo_lr
         self.material_optimizer.param_groups[1]["lr"] = material_lr
         self.emitter_optimizer.param_groups[0]["lr"] = emitter_lr
+        for optimizer in (self.geometry_optimizer, self.material_optimizer, self.emitter_optimizer):
+            for group in optimizer.param_groups:
+                active = group["lr"] > 0.0
+                for parameter in group["params"]:
+                    parameter.requires_grad_(active)
+                    if not active:
+                        parameter.grad = None
         return geometry_lr, albedo_lr, material_lr, emitter_lr
 
     def _should_adapt(self, step: int) -> bool:

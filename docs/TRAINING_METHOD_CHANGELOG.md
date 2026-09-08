@@ -71,9 +71,14 @@ Effective from 2026-09-07:
 - Material prior L1 supervision uses all valid pixels in the rasterized view.
   The expensive BRDF, visibility, and indirect-light transport remains limited
   to the 256-primary-point patch and therefore retains the paper ray budget.
-- Checkpoint v11 stores the initialization-relative emitter scale anchors and
+- SH proxy fades independently over 5K-10K. Steps 10K-15K train materials under
+  fully explicit secondary transport; steps 15K-20K update emitters only.
+- Zero-LR groups disable gradients and do not participate in clipping. Frozen
+  geometry skips BVH rebuilds/refinement, and fully frozen scene parameters
+  skip the material prior/TV training terms (logged as zero, not measured errors).
+- Checkpoint v12 stores the initialization-relative emitter scale anchors and
   both material optimizer groups, and identifies the full-view material-prior
-  objective for exact resume.
+  objective, independent SH schedule, and active clipping semantics for exact resume.
 
 The Conference wrapper exposes these settings as `ALBEDO_LR`,
 `OPTIMIZE_EMITTER_CENTERS`, `OPTIMIZE_EMITTER_ROTATIONS`,
@@ -82,6 +87,46 @@ The Conference wrapper exposes these settings as `ALBEDO_LR`,
 `EMITTER_ADAPTATION`.
 
 ## Chronological changes
+
+### 2026-09-08 — True parameter freezing and independent SH transition
+
+Previous baseline: `6c41fd9`, v11. Geometry/material freezing only set Adam LR
+to zero. Their gradients still entered global clipping, so unused gradients
+could shrink emitter/material gradients. Prior/TV and BVH rebuilds continued
+after freeze. SH fade and material LR decay both ended at 15K.
+
+Implementation:
+
+- `_update_lrs` switches optimizer-owned leaf parameters' `requires_grad` flags
+  with their LR and clears stale gradients for inactive groups. Clipping only
+  includes parameters in positive-LR groups. Fixed emitter pose remains excluded
+  from its optimizer.
+- Prior/TV are skipped when no scene parameter can learn; gradients through
+  transport to the emitter are preserved. These skipped loss entries are zero
+  and must not be interpreted as perfect prior agreement.
+- The rasterizer screen-space gradient placeholder is disabled for fixed geometry.
+  Scene refinement is also disabled while geometry is frozen.
+- BVH refresh requires a preceding geometry update. The first frozen step still
+  refreshes after the final active update; a restored trainer builds its own BVH.
+- Added persisted `sh_fade_start=5000`, `sh_fade_end=10000`, independent of the
+  unchanged material LR decay from 5K to 15K. Exposed CLI flags and Conference
+  wrapper environment variables `SH_FADE_START` / `SH_FADE_END`.
+- v12 marks the changed optimization semantics. v1-v11 remain inference-loadable,
+  but cannot exact-resume as v12. Legacy config loading recovers the old coupled
+  fade when the new fields are absent. Old fade timing can be selected with
+  `SH_FADE_END=15000`; exact reproduction of old clipping needs the old commit.
+
+Regression checks cover frozen-gradient clipping isolation, actual parameter
+freeze and retained emitter derivatives, skipped regularizers, and schedule
+serialization/legacy interpretation. No changes to PDF, expected hit, SH radiance
+units, origin offset, GGX, or emitter initialization are included in this change.
+
+Validation: 110 tests passed. A four-step CUDA smoke run using the actual
+Conference scene crossed the SH transition and material-freeze boundary:
+geometry tensors stayed bitwise unchanged, frozen scene gradients were absent,
+emitter RGB gradients remained finite/nonzero, BVH refresh count was zero, and
+the resulting checkpoint was v12. Peak allocated GPU memory was 0.41 GiB.
+This is a functional smoke test, not a new 20K quality/convergence evaluation.
 
 ### 2026-09-07 — Bundle patched extension sources for another computer
 

@@ -278,7 +278,8 @@ def test_training_sh_proxy_fades_before_inference() -> None:
     config = AEGIRConfig()
     assert training_sh_proxy_weight(config, 0) == 1.0
     assert training_sh_proxy_weight(config, 5_000) == 1.0
-    assert training_sh_proxy_weight(config, 10_000) == 0.5
+    assert training_sh_proxy_weight(config, 7_500) == 0.5
+    assert training_sh_proxy_weight(config, 10_000) == 0.0
     assert training_sh_proxy_weight(config, 15_000) == 0.0
     assert training_sh_proxy_weight(config, 19_999) == 0.0
     config.render.indirect_bounce = False

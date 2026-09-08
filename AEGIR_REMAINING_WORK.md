@@ -22,6 +22,19 @@
 
 ## 완료된 기반 작업
 
+### [x] 실제 gradient freeze 및 SH 전환 일정 분리 (2026-09-08)
+
+- LR=0인 optimizer 그룹의 gradient를 끄고 clipping에서 제외한다.
+- geometry 고정 중 BVH 반복 재생성과 scene refinement를 생략한다.
+  마지막 geometry 업데이트는 첫 frozen step에서 BVH에 반영한다.
+- 전체 scene이 고정된 단계의 prior/TV 계산을 생략한다.
+- SH fade를 5K–10K로 분리하고 material은 15K까지 학습한다.
+- 체크포인트 v12; 이전 버전은 렌더링 호환, exact resume은 v12만 허용.
+- 회귀 테스트: clipping 간섭 제거, freeze 이후 emitter 미분 유지,
+  regularizer 생략, 독립 일정 저장 및 과거 config 해석 검증.
+- 전체 테스트 110개 통과. 실제 Conference CUDA 4-step 검사에서 geometry
+  불변, frozen gradient 없음, emitter gradient 유지, BVH 재생성 0회 확인.
+
 ### [x] 외부 CUDA 소스 Git 배포 (2026-09-07)
 
 - AEGIR `external/`에 수정된 IRGS tracer와 공식 2DGS rasterizer 및

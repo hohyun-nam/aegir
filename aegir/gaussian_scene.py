@@ -312,7 +312,7 @@ class GaussianMaterialBackend(nn.Module):
         rasterizer = GaussianRasterizer(raster_settings=settings)
 
         def render_attributes(attributes: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-            means2d = torch.zeros_like(self.means, requires_grad=True)
+            means2d = torch.zeros_like(self.means, requires_grad=self.means.requires_grad)
             rendered_chw, radii, auxiliary_chw = rasterizer(
                 means3D=self.means,
                 means2D=means2d,

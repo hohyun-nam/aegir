@@ -31,7 +31,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--resume",
         type=Path,
         default=None,
-        help="resume an exact-resume v11 checkpoint; checkpoint config remains authoritative",
+        help="resume an exact-resume v12 checkpoint; checkpoint config remains authoritative",
     )
     train.add_argument("--output", type=Path, required=True)
     train.add_argument("--device", default="cuda")
@@ -91,6 +91,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train.add_argument("--freeze-start", type=int, default=5_000)
     train.add_argument("--freeze-end", type=int, default=15_000)
+    train.add_argument("--sh-fade-start", type=int, default=5_000)
+    train.add_argument("--sh-fade-end", type=int, default=10_000)
     train.add_argument("--checkpoint-every", type=int, default=5_000)
     train.add_argument("--num-brdf-samples", type=int, default=128)
     train.add_argument("--num-light-samples", type=int, default=128)
@@ -278,6 +280,8 @@ def main() -> None:
         config.training.emitter_scale_max_ratio = args.emitter_scale_max_ratio
         config.training.freeze_start = args.freeze_start
         config.training.freeze_end = args.freeze_end
+        config.training.sh_fade_start = args.sh_fade_start
+        config.training.sh_fade_end = args.sh_fade_end
         config.training.checkpoint_every = args.checkpoint_every
         config.adaptive.max_emitters = args.max_emitters
         config.adaptive.enabled = args.enable_emitter_adaptation

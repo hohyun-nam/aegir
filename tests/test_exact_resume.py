@@ -248,7 +248,7 @@ def test_legacy_checkpoint_is_rejected_for_exact_resume(tmp_path: Path) -> None:
     payload.pop("training_state", None)
     torch.save(payload, checkpoint)
 
-    with pytest.raises(ValueError, match="only v11"):
+    with pytest.raises(ValueError, match="only v12"):
         require_exact_resume_state(payload, checkpoint)
     loaded_scene, loaded_emitters, _ = load_checkpoint(checkpoint, "cpu")
     assert loaded_scene.gaussian_count == scene.gaussian_count
@@ -266,7 +266,7 @@ def test_v6_checkpoint_is_loadable_but_not_exactly_resumable(tmp_path: Path) -> 
     payload["training_state"] = {"next_step": 3}
     torch.save(payload, checkpoint)
 
-    with pytest.raises(ValueError, match="only v11"):
+    with pytest.raises(ValueError, match="only v12"):
         require_exact_resume_state(payload, checkpoint)
     loaded_scene, loaded_emitters, _ = load_checkpoint(checkpoint, "cpu")
     assert loaded_scene.gaussian_count == scene.gaussian_count

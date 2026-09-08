@@ -104,6 +104,8 @@ class TrainingConfig:
     emitter_scale_max_ratio: float = 1.0
     freeze_start: int = 5_000
     freeze_end: int = 15_000
+    sh_fade_start: int = 5_000
+    sh_fade_end: int = 10_000
     adaptive_every: int = 1_000
     # Historical name kept for checkpoint/CLI compatibility. This is the
     # number of primary surface points, not the total Monte Carlo ray count.
@@ -184,12 +186,16 @@ def config_from_dict(payload: dict[str, Any]) -> AEGIRConfig:
     scene_culling_values = payload.get("scene_culling", {})
     if legacy_scene_culling:
         scene_culling_values = {"enabled": False}
+    training_values = dict(payload.get("training", {}))
+    # Old checkpoints coupled the SH fade to the material freeze schedule.
+    training_values.setdefault("sh_fade_start", training_values.get("freeze_start", 5_000))
+    training_values.setdefault("sh_fade_end", training_values.get("freeze_end", 15_000))
     return AEGIRConfig(
         raster=RasterConfig(**known_fields(RasterConfig, payload.get("raster", {}))),
         render=RenderConfig(**known_fields(RenderConfig, payload.get("render", {}))),
         losses=LossWeights(**known_fields(LossWeights, payload.get("losses", {}))),
         color=ColorConfig(**known_fields(ColorConfig, payload.get("color", {}))),
-        training=TrainingConfig(**known_fields(TrainingConfig, payload.get("training", {}))),
+        training=TrainingConfig(**known_fields(TrainingConfig, training_values)),
         adaptive=AdaptiveConfig(**known_fields(AdaptiveConfig, payload.get("adaptive", {}))),
         scene_culling=SceneCullingConfig(
             **known_fields(SceneCullingConfig, scene_culling_values)
