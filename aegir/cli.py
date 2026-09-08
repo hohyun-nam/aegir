@@ -93,6 +93,12 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--freeze-end", type=int, default=15_000)
     train.add_argument("--sh-fade-start", type=int, default=5_000)
     train.add_argument("--sh-fade-end", type=int, default=10_000)
+    train.add_argument(
+        "--training-transport-mode",
+        choices=("hybrid", "secondary_only", "sh_proxy_only"),
+        default="hybrid",
+        help="training-time indirect transport schedule stored in the checkpoint",
+    )
     train.add_argument("--checkpoint-every", type=int, default=5_000)
     train.add_argument("--num-brdf-samples", type=int, default=128)
     train.add_argument("--num-light-samples", type=int, default=128)
@@ -282,6 +288,7 @@ def main() -> None:
         config.training.freeze_end = args.freeze_end
         config.training.sh_fade_start = args.sh_fade_start
         config.training.sh_fade_end = args.sh_fade_end
+        config.training.training_transport_mode = args.training_transport_mode
         config.training.checkpoint_every = args.checkpoint_every
         config.adaptive.max_emitters = args.max_emitters
         config.adaptive.enabled = args.enable_emitter_adaptation

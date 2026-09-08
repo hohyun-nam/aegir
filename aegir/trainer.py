@@ -107,10 +107,20 @@ def training_sh_proxy_weight(config: AEGIRConfig, step: int) -> float:
     """Finish the SH fade before material learning freezes."""
 
     cfg = config.training
+    valid_modes = {"hybrid", "secondary_only", "sh_proxy_only"}
+    if cfg.training_transport_mode not in valid_modes:
+        raise ValueError(
+            "training transport mode must be one of "
+            f"{sorted(valid_modes)}, got {cfg.training_transport_mode!r}"
+        )
+    if not config.render.indirect_bounce or cfg.training_transport_mode == "secondary_only":
+        return 0.0
+    if cfg.training_transport_mode == "sh_proxy_only":
+        return 1.0
     if not 0 <= cfg.sh_fade_start < cfg.sh_fade_end:
         raise ValueError("SH fade requires 0 <= sh_fade_start < sh_fade_end")
-    if not config.render.indirect_bounce or step <= cfg.sh_fade_start:
-        return 1.0 if config.render.indirect_bounce else 0.0
+    if step <= cfg.sh_fade_start:
+        return 1.0
     if step >= cfg.sh_fade_end:
         return 0.0
     return 1.0 - (step - cfg.sh_fade_start) / (cfg.sh_fade_end - cfg.sh_fade_start)

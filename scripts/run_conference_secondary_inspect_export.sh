@@ -15,6 +15,7 @@ OUTPUT_ROOT="${OUTPUT_ROOT:?OUTPUT_ROOT is required}"
 RENDER_SAMPLES="${RENDER_SAMPLES:-128}"
 BOUNCE_SAMPLES="${BOUNCE_SAMPLES:-}"
 MAX_VIEWS="${MAX_VIEWS:-30}"
+EXPORT_PLY="${EXPORT_PLY:-1}"
 SECONDARY_DIR="$OUTPUT_ROOT/inspect_secondary_bounce"
 PLY="$OUTPUT_ROOT/aegir_20k_scene_emitters.ply"
 
@@ -30,6 +31,10 @@ if (( MAX_VIEWS <= 0 || RENDER_SAMPLES <= 0 )); then
 fi
 if [[ -n "$BOUNCE_SAMPLES" ]] && (( BOUNCE_SAMPLES <= 0 )); then
   echo "BOUNCE_SAMPLES must be positive when set" >&2
+  exit 1
+fi
+if [[ "$EXPORT_PLY" != "0" && "$EXPORT_PLY" != "1" ]]; then
+  echo "EXPORT_PLY must be 0 or 1" >&2
   exit 1
 fi
 
@@ -67,13 +72,19 @@ echo "[1/2] Secondary-bounce inspect: $MAX_VIEWS poses"
   --evaluation-seed 2026 \
   --device cuda
 
-echo "[2/2] Export scene plus green emitters"
-"$PYTHON" scripts/export_scene_supersplat.py \
-  --checkpoint "$CHECKPOINT" \
-  --output "$PLY" \
-  --max-gaussians 500000
+if [[ "$EXPORT_PLY" == "1" ]]; then
+  echo "[2/2] Export scene plus green emitters"
+  "$PYTHON" scripts/export_scene_supersplat.py \
+    --checkpoint "$CHECKPOINT" \
+    --output "$PLY" \
+    --max-gaussians 500000
+else
+  echo "[2/2] PLY export skipped"
+fi
 
 echo "Inspect: $SECONDARY_DIR"
 echo "Target/render frames: $SECONDARY_DIR/target_render_compare_frames"
 echo "Metrics: $SECONDARY_DIR/metrics.json"
-echo "PLY: $PLY"
+if [[ "$EXPORT_PLY" == "1" ]]; then
+  echo "PLY: $PLY"
+fi

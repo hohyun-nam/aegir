@@ -88,6 +88,29 @@ The Conference wrapper exposes these settings as `ALBEDO_LR`,
 
 ## Chronological changes
 
+### 2026-09-08 — Persisted training transport ablations
+
+Previous secondary-only and SH-only experiments replaced
+`training_sh_proxy_weight` outside the saved configuration. Their checkpoints
+therefore appeared hybrid even though the actual runs were not.
+
+- Added persisted `training_transport_mode` values `hybrid`,
+  `secondary_only`, and `sh_proxy_only`. The default remains `hybrid`.
+- `secondary_only` uses explicit emitter NEE from the first training step;
+  `sh_proxy_only` uses the frozen DN SH proxy for every step. Hybrid retains
+  the independent 5K-10K cross-fade.
+- Added a Conference secondary-only pipeline that trains with one bounce
+  sample, creates a 30-view GT / DiffusionRenderer albedo / learned albedo
+  comparison, rerenders the same 30 poses with one and eight bounce samples,
+  and composes the three columns into a comparison folder.
+- The secondary inspect helper can skip its otherwise duplicate PLY export via
+  `EXPORT_PLY=0`. Once the full pipeline completes, non-20K intermediate
+  checkpoints in that new run are removed in accordance with the current
+  output-retention policy.
+
+Increasing the inspection bounce sample count reduces Monte Carlo variance;
+it does not retrain the checkpoint or remove estimator bias.
+
 ### 2026-09-08 — True parameter freezing and independent SH transition
 
 Previous baseline: `6c41fd9`, v11. Geometry/material freezing only set Adam LR

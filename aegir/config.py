@@ -106,6 +106,10 @@ class TrainingConfig:
     freeze_end: int = 15_000
     sh_fade_start: int = 5_000
     sh_fade_end: int = 10_000
+    # ``hybrid`` fades from frozen DN SH to explicit secondary NEE.
+    # Ablations persist their transport choice in the checkpoint instead of
+    # monkey-patching the trainer at runtime.
+    training_transport_mode: str = "hybrid"
     adaptive_every: int = 1_000
     # Historical name kept for checkpoint/CLI compatibility. This is the
     # number of primary surface points, not the total Monte Carlo ray count.

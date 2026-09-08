@@ -21,6 +21,7 @@ NEUTRAL_ALBEDO="${NEUTRAL_ALBEDO:-0.5}"
 ALBEDO_LR="${ALBEDO_LR:-0.003}"
 SH_FADE_START="${SH_FADE_START:-5000}"
 SH_FADE_END="${SH_FADE_END:-10000}"
+TRAINING_TRANSPORT_MODE="${TRAINING_TRANSPORT_MODE:-hybrid}"
 SIX_AXIS_EMISSION="${SIX_AXIS_EMISSION:-1}"
 EMITTER_AXIS_LOBE_SHARPNESS="${EMITTER_AXIS_LOBE_SHARPNESS:-12.0}"
 OPTIMIZE_EMITTER_CENTERS="${OPTIMIZE_EMITTER_CENTERS:-0}"
@@ -75,6 +76,7 @@ fi
 export GEOMETRY DATA PRIORS CHECKPOINT BOUNCE_SAMPLES RASTER_SIZE GEOMETRY_LR SCENE_CULLING
 export ALBEDO_INITIALIZATION NEUTRAL_ALBEDO ALBEDO_LR
 export SH_FADE_START SH_FADE_END
+export TRAINING_TRANSPORT_MODE
 export SIX_AXIS_EMISSION EMITTER_AXIS_LOBE_SHARPNESS
 export OPTIMIZE_EMITTER_CENTERS OPTIMIZE_EMITTER_ROTATIONS OPTIMIZE_EMITTER_SCALES
 export CONSTRAIN_EMITTER_SCALES EMITTER_SCALE_MIN_RATIO EMITTER_SCALE_MAX_RATIO
@@ -89,7 +91,7 @@ echo "geometry: $GEOMETRY"
 echo "checkpoint: $CHECKPOINT"
 echo "geometry_lr=$GEOMETRY_LR scene_culling=$SCENE_CULLING raster_size=$RASTER_SIZE origin_offset=0.15 bounce_samples=$BOUNCE_SAMPLES albedo_initialization=$ALBEDO_INITIALIZATION neutral_albedo=$NEUTRAL_ALBEDO albedo_lr=$ALBEDO_LR six_axis_emission=$SIX_AXIS_EMISSION axis_lobe_sharpness=$EMITTER_AXIS_LOBE_SHARPNESS"
 echo "emitter_centers_trainable=$OPTIMIZE_EMITTER_CENTERS emitter_rotations_trainable=$OPTIMIZE_EMITTER_ROTATIONS emitter_scales_trainable=$OPTIMIZE_EMITTER_SCALES emitter_scale_constraint=$CONSTRAIN_EMITTER_SCALES scale_ratio=[$EMITTER_SCALE_MIN_RATIO,$EMITTER_SCALE_MAX_RATIO] emitter_adaptation=$EMITTER_ADAPTATION"
-echo "sh_fade=[$SH_FADE_START,$SH_FADE_END] material_freeze=15000"
+echo "training_transport_mode=$TRAINING_TRANSPORT_MODE sh_fade=[$SH_FADE_START,$SH_FADE_END] material_freeze=15000"
 
 if [[ ! -s "$CHECKPOINT" ]]; then
   resume=""
@@ -138,6 +140,7 @@ config.training.freeze_start = 5_000
 config.training.freeze_end = 15_000
 config.training.sh_fade_start = int(os.environ["SH_FADE_START"])
 config.training.sh_fade_end = int(os.environ["SH_FADE_END"])
+config.training.training_transport_mode = os.environ["TRAINING_TRANSPORT_MODE"]
 config.raster.image_size = int(os.environ["RASTER_SIZE"])
 config.scene_culling.enabled = os.environ["SCENE_CULLING"] == "1"
 config.adaptive.enabled = os.environ["EMITTER_ADAPTATION"] == "1"

@@ -138,6 +138,9 @@ stored separately from visualization PNGs.
   the two weights always sum to one; steps 10K-15K use explicit NEE while
   materials still learn, followed by emitter-only steps 15K-20K. Configure this
   independently with `--sh-fade-start` / `--sh-fade-end`
+- select `--training-transport-mode secondary_only` for explicit secondary
+  NEE throughout training or `sh_proxy_only` for the frozen-DN-SH ablation;
+  the selected mode is stored in the checkpoint
 - zero-LR optimizer groups disable parameter gradients and are excluded from
   gradient clipping. Fully frozen scene materials skip prior/TV computation;
   BVH rebuilds occur only after geometry updates, including the final update

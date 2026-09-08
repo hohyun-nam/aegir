@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import math
+from dataclasses import asdict
 from pathlib import Path
 
 import pytest
@@ -284,6 +285,23 @@ def test_training_sh_proxy_fades_before_inference() -> None:
     assert training_sh_proxy_weight(config, 19_999) == 0.0
     config.render.indirect_bounce = False
     assert training_sh_proxy_weight(config, 0) == 0.0
+
+
+def test_training_transport_ablation_modes_are_exact_and_persisted() -> None:
+    config = AEGIRConfig()
+    config.training.training_transport_mode = "secondary_only"
+    assert training_sh_proxy_weight(config, 0) == 0.0
+    assert training_sh_proxy_weight(config, 19_999) == 0.0
+    restored = config_from_dict(asdict(config))
+    assert restored.training.training_transport_mode == "secondary_only"
+
+    config.training.training_transport_mode = "sh_proxy_only"
+    assert training_sh_proxy_weight(config, 0) == 1.0
+    assert training_sh_proxy_weight(config, 19_999) == 1.0
+
+    config.training.training_transport_mode = "unknown"
+    with pytest.raises(ValueError, match="training transport mode"):
+        training_sh_proxy_weight(config, 0)
 
 
 def test_default_transport_budget_is_2_pow_16_rays() -> None:
