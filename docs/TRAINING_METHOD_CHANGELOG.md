@@ -256,24 +256,6 @@ Implementation:
 - Bumped exact-resume checkpoints from v9 to v10. V1-v9 remain loadable for
   inference or emitter warm start, but not exact optimizer resume.
 
-### 2026-09-09 — Accumulated-alpha filtering for 2DGS TSDF meshes
-
-Problem observed:
-
-- The bounded 2DGS mesh exporter rendered both surface depth and accumulated
-  alpha, but integrated every rendered depth into TSDF regardless of alpha.
-- Low-opacity Gaussian support that was nearly invisible in splat rendering
-  consequently became solid disconnected mesh floaters.
-
-Implementation:
-
-- Added the opt-in `--mesh_alpha_min` argument to the external 2DGS exporter.
-- Pixels whose rendered accumulated alpha is below the threshold now receive
-  zero depth before both the dataset mask and Open3D TSDF integration.
-- The default remains `0.0`, preserving previous mesh-export behavior. The
-  first controlled Conference comparison uses expected depth, a 6 m depth
-  truncation, and `--mesh_alpha_min 0.5`.
-
 ## Recovering older code with Git
 
 Every pushed commit remains available unless repository history is forcibly
