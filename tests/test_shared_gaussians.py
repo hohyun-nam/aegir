@@ -41,6 +41,7 @@ from aegir.trainer import (
     constrain_emitter_scales,
     curriculum_lrs,
     full_view_material_prior_loss,
+    scheduled_light_white_weight,
     training_sh_proxy_weight,
 )
 
@@ -248,6 +249,18 @@ def test_paper_curriculum() -> None:
     assert emitter == 5.5e-4
     assert curriculum_lrs(config, 15_000) == (0.0, 0.0, 0.0, 1.0e-4)
     assert curriculum_lrs(config, 19_999) == (0.0, 0.0, 0.0, 1.0e-4)
+
+
+def test_white_light_weight_is_disabled_by_default_and_can_ramp() -> None:
+    config = AEGIRConfig()
+    assert scheduled_light_white_weight(config, 0) == 0.0
+    config.losses.light_white = 0.1
+    config.training.light_white_ramp_end = 15_000
+    assert scheduled_light_white_weight(config, 0) == 0.0
+    assert scheduled_light_white_weight(config, 3_750) == 0.015625
+    assert scheduled_light_white_weight(config, 7_500) == 0.05
+    assert scheduled_light_white_weight(config, 15_000) == 0.1
+    assert scheduled_light_white_weight(config, 19_999) == 0.1
 
 
 def test_default_emitter_policy_fixes_pose_and_constrains_scale() -> None:

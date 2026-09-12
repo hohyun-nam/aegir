@@ -18,6 +18,7 @@ from .data import (
     saved_pose_to_model_transform,
     transform_camera,
 )
+from .denoising import cross_bilateral_denoise
 from .emitter_inspection import create_emitter_evolution_outputs
 from .evaluation import (
     build_lpips_model,
@@ -131,6 +132,12 @@ def inspect_checkpoint(
     lpips_net: str = "alex",
     training_sh_proxy: bool = False,
     symmetric_emission: bool = False,
+    denoise_indirect: bool = False,
+    denoiser_radius: int = 2,
+    denoiser_sigma_spatial: float = 2.0,
+    denoiser_sigma_depth: float = 1.0,
+    denoiser_normal_power: float = 32.0,
+    denoiser_depth_epsilon: float = 1.0e-3,
 ) -> None:
     scene, emitters, payload = load_checkpoint(checkpoint, device)
     config = config_from_dict(payload["config"])
@@ -189,6 +196,29 @@ def inspect_checkpoint(
             generator=generator,
             transport_mode="training" if training_sh_proxy else "inference",
         )
+        if denoise_indirect:
+            surface_mask = (
+                (rendered["alpha"][..., 0] >= config.raster.alpha_threshold)
+                & (rendered["emitter_mask"][..., 0] < 0.5)
+            )
+            rendered["indirect_hdr"] = cross_bilateral_denoise(
+                rendered["indirect_hdr"],
+                rendered["depth"],
+                rendered["normals"],
+                surface_mask,
+                radius=denoiser_radius,
+                sigma_spatial=denoiser_sigma_spatial,
+                sigma_depth=denoiser_sigma_depth,
+                normal_power=denoiser_normal_power,
+                depth_epsilon=denoiser_depth_epsilon,
+            )
+            rendered["hdr"] = (
+                rendered["direct_hdr"] + rendered["indirect_hdr"] + rendered["emission_hdr"]
+            )
+            rendered["indirect_rgb"] = display_srgb(
+                rendered["indirect_hdr"], config.render.tonemap_exposure
+            )
+            rendered["rgb"] = display_srgb(rendered["hdr"], config.render.tonemap_exposure)
         if observation_policy["domain"] == "linear_hdr":
             if frame.radiance_hdr is None:
                 raise RuntimeError("linear-HDR evaluation frame has no HDR observation")
@@ -249,6 +279,7 @@ def inspect_checkpoint(
             Image.fromarray(_to_u8(rendered["emitter_mask"])).save(
                 output_dir / "emitter_mask.png"
             )
+            Image.fromarray(_to_u8(rendered["indirect_rgb"])).save(output_dir / "indirect.png")
             Image.fromarray(_normal_u8(rendered["normals"])).save(output_dir / "normals.png")
             Image.fromarray(_depth_u8(rendered["depth"])).save(output_dir / "depth.png")
     summary = {
@@ -282,7 +313,18 @@ def inspect_checkpoint(
             ),
             "learned_scene_exposure": (float(learned_exposure) if learned_exposure is not None else None),
             "linear_hdr_saved": True,
-            "visualization_denoiser": "none",
+            "visualization_denoiser": (
+                {
+                    "type": "cross_bilateral_indirect_hdr",
+                    "radius": denoiser_radius,
+                    "sigma_spatial": denoiser_sigma_spatial,
+                    "sigma_depth": denoiser_sigma_depth,
+                    "normal_power": denoiser_normal_power,
+                    "depth_epsilon": denoiser_depth_epsilon,
+                }
+                if denoise_indirect
+                else "none"
+            ),
             "paper_inference_bounce_ready": not training_sh_proxy,
             "training_sh_proxy_used": training_sh_proxy,
             "bounce_policy": (

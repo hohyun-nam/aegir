@@ -64,7 +64,9 @@ class LossWeights:
     tv_metallic: float = 0.25
     tv_beta: float = 1.0
     light_area: float = 0.5
-    light_white: float = 0.1
+    # Blender ablations showed that 0.1 forces genuinely warm emitters toward
+    # gray and degrades reconstruction. Keep color neutrality opt-in.
+    light_white: float = 0.0
     light_bounds: float = 0.5
     # Non-paper stabilization priors. Keep disabled for paper-faithful runs;
     # enable explicitly if emitters drift away from surfaces/observed views.
@@ -106,6 +108,9 @@ class TrainingConfig:
     freeze_end: int = 15_000
     sh_fade_start: int = 5_000
     sh_fade_end: int = 10_000
+    # Zero applies losses.light_white from the first step. A positive step uses
+    # a smoothstep ramp from zero at step 0 to that target at this step.
+    light_white_ramp_end: int = 0
     # ``hybrid`` fades from frozen DN SH to explicit secondary NEE.
     # Ablations persist their transport choice in the checkpoint instead of
     # monkey-patching the trainer at runtime.

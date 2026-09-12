@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
@@ -28,6 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prior-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--image-size", type=int, default=256)
+    parser.add_argument("--max-views", type=int, default=None)
     parser.add_argument("--device", default="cuda")
     return parser.parse_args()
 
@@ -92,6 +92,10 @@ def main() -> None:
     cameras_b = load_camera_path(
         transforms_path, payload_b["source_dnsplatter_checkpoint"], args.image_size
     )
+    if args.max_views is not None:
+        frames = frames[: args.max_views]
+        cameras_a = cameras_a[: args.max_views]
+        cameras_b = cameras_b[: args.max_views]
     if not (len(frames) == len(cameras_a) == len(cameras_b)):
         raise ValueError("frame and camera counts do not match")
 

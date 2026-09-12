@@ -53,7 +53,7 @@ Git commit: `b4392c0` (`Add six-axis emitters and corrected AEGIR transport pipe
 
 ## Current default method
 
-Effective from 2026-09-07:
+Effective from 2026-09-12:
 
 - Emitter centers and rotations are fixed at their initialized values.
 - Emitter scales remain trainable but are clamped independently per axis to
@@ -65,6 +65,8 @@ Effective from 2026-09-07:
 - Albedo initializes from DN SH DC appearance by default, using the historical
   `(0.5 + SH_C0 * DC).clamp(0.02, 0.98)` formula without an additional color
   conversion. Neutral RGB `(0.5, 0.5, 0.5)` remains an explicit option.
+- White-light regularization is disabled by default (`light_white=0`,
+  `light_white_ramp_end=0`). It remains available as an explicit ablation.
 - Albedo uses a dedicated Adam parameter group with initial LR `3e-3`.
   Roughness and metallic retain their shared `1e-3` LR. Both groups follow the
   same 5K-15K linear decay-to-zero curriculum.
@@ -84,9 +86,68 @@ The Conference wrapper exposes these settings as `ALBEDO_LR`,
 `OPTIMIZE_EMITTER_CENTERS`, `OPTIMIZE_EMITTER_ROTATIONS`,
 `OPTIMIZE_EMITTER_SCALES`, `CONSTRAIN_EMITTER_SCALES`,
 `EMITTER_SCALE_MIN_RATIO`, `EMITTER_SCALE_MAX_RATIO`, and
-`EMITTER_ADAPTATION`.
+`EMITTER_ADAPTATION`, plus `LIGHT_WHITE` and `LIGHT_WHITE_RAMP_END`.
 
 ## Chronological changes
+
+### 2026-09-12 — Optional inspect denoiser and matched comparison artifacts
+
+- Added an opt-in cross-bilateral filter for the indirect linear-HDR component
+  during `inspect`. It uses rendered depth and normals for edge stopping, then
+  recomposes direct, filtered indirect, and emission before tone mapping.
+- The default inspection remains unfiltered. Denoising does not alter training
+  or checkpoints, and inspect metadata records the full filter configuration so
+  filtered output cannot be mistaken for the baseline renderer.
+- Raw metric frames now include the components needed to create reproducible
+  no-denoiser/denoiser and white-loss comparisons. The Blender full-course
+  scripts generate per-frame panels, contact sheets, GIFs, and metric summaries.
+
+### 2026-09-12 — SH-DC albedo and no white-light prior as the Blender default
+
+Three controlled 20K runs used the same GT-depth voxel-0.10 2DGS geometry,
+frozen geometry, hybrid transport, one secondary sample, 128 BRDF/light
+samples, and the same 30-view seed-2026 no-denoiser inspection. Only albedo
+initialization and the fixed white-light loss differed:
+
+| Albedo initialization | `light_white` | PSNR | SSIM | LPIPS |
+| --- | ---: | ---: | ---: | ---: |
+| SH DC | 0 | **19.315** | **0.527** | **0.486** |
+| SH DC | 0.1 | 17.318 | 0.515 | 0.542 |
+| Neutral 0.5 | 0 | 19.049 | 0.492 | 0.520 |
+
+- With SH DC and `light_white=0.1`, the final mean emitter RGB became
+  `(15.0965, 15.0963, 15.0965)`. The prior removed the warm illumination in
+  the Blender observations and produced a visibly gray rendering.
+- With neutral-0.5 initialization and no white prior, the learned albedo stayed
+  visibly pale while mean emitter RGB moved to `(36.9712, 21.6126, 9.6826)`.
+  Material and illumination color compensated for one another, producing an
+  overly yellow light.
+- SH DC with no white prior gave the best reconstruction metrics and visual
+  balance. The default `LossWeights.light_white`, training CLI
+  `--light-white`, and frozen-geometry wrapper `LIGHT_WHITE` are now zero.
+  `albedo_initialization=sh_dc`, `light_white_ramp_end=0`, hybrid transport,
+  and the existing schedules remain the defaults.
+- This result selects the Blender reconstruction baseline. It does not by
+  itself prove physically correct material-light separation; changed-light
+  Blender ground truth is still required to validate relighting.
+
+Validation: 116 tests passed, including the CUDA/OptiX tracer tests with the
+validated NVIDIA 580.173.02 OptiX runtime. Ruff passes on every changed Python
+file; the repository-wide Ruff scan still reports pre-existing findings in
+unmodified files.
+
+### 2026-09-11 — Optional white-light prior ramp
+
+- Added `training.light_white_ramp_end`, with a default of zero that preserved
+  the then-current fixed `lambda_white=0.1` behavior. The target weight later
+  changed to zero by default after the 2026-09-12 Blender ablation.
+- A positive ramp end applies `smoothstep(clamp(step / ramp_end, 0, 1))` to
+  the final white-light weight. The active weight is recorded in every
+  loss-history entry so checkpoint comparisons can audit the exact schedule.
+- Added `--light-white` and `--light-white-ramp-end` to the training CLI and
+  matching environment controls to the frozen-geometry experiment wrapper.
+- This supports the Blender ablation that starts the prior at zero, reaches the
+  paper value `0.1` at step 15K, and holds it there through step 20K.
 
 ### 2026-09-08 — Persisted training transport ablations
 

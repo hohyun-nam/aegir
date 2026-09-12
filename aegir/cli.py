@@ -99,6 +99,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="hybrid",
         help="training-time indirect transport schedule stored in the checkpoint",
     )
+    train.add_argument(
+        "--light-white",
+        type=float,
+        default=0.0,
+        help="final white-light regularization weight",
+    )
+    train.add_argument(
+        "--light-white-ramp-end",
+        type=int,
+        default=0,
+        help="smoothly ramp white-light weight from zero until this step; 0 keeps it fixed",
+    )
     train.add_argument("--checkpoint-every", type=int, default=5_000)
     train.add_argument("--num-brdf-samples", type=int, default=128)
     train.add_argument("--num-light-samples", type=int, default=128)
@@ -215,6 +227,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="render with the original front/back-symmetric emission model",
     )
+    inspect.add_argument(
+        "--denoise-indirect",
+        action="store_true",
+        help="cross-bilateral filter indirect HDR using rendered depth and normals",
+    )
+    inspect.add_argument("--denoiser-radius", type=int, default=2)
+    inspect.add_argument("--denoiser-sigma-spatial", type=float, default=2.0)
+    inspect.add_argument("--denoiser-sigma-depth", type=float, default=1.0)
+    inspect.add_argument("--denoiser-normal-power", type=float, default=32.0)
+    inspect.add_argument("--denoiser-depth-epsilon", type=float, default=1.0e-3)
 
     inspect_emitters = subparsers.add_parser(
         "inspect-emitters",
@@ -289,6 +311,8 @@ def main() -> None:
         config.training.sh_fade_start = args.sh_fade_start
         config.training.sh_fade_end = args.sh_fade_end
         config.training.training_transport_mode = args.training_transport_mode
+        config.losses.light_white = args.light_white
+        config.training.light_white_ramp_end = args.light_white_ramp_end
         config.training.checkpoint_every = args.checkpoint_every
         config.adaptive.max_emitters = args.max_emitters
         config.adaptive.enabled = args.enable_emitter_adaptation
@@ -340,6 +364,12 @@ def main() -> None:
             lpips_net=args.lpips_net,
             training_sh_proxy=args.training_sh_proxy,
             symmetric_emission=args.symmetric_emission,
+            denoise_indirect=args.denoise_indirect,
+            denoiser_radius=args.denoiser_radius,
+            denoiser_sigma_spatial=args.denoiser_sigma_spatial,
+            denoiser_sigma_depth=args.denoiser_sigma_depth,
+            denoiser_normal_power=args.denoiser_normal_power,
+            denoiser_depth_epsilon=args.denoiser_depth_epsilon,
         )
     elif args.command == "inspect-emitters":
         inspect_emitter_evolution(

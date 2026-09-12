@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import torch
@@ -124,6 +125,22 @@ def training_sh_proxy_weight(config: AEGIRConfig, step: int) -> float:
     if step >= cfg.sh_fade_end:
         return 0.0
     return 1.0 - (step - cfg.sh_fade_start) / (cfg.sh_fade_end - cfg.sh_fade_start)
+
+
+def scheduled_light_white_weight(config: AEGIRConfig, step: int) -> float:
+    """Return the active white-light prior, optionally ramped from zero."""
+
+    target = config.losses.light_white
+    ramp_end = config.training.light_white_ramp_end
+    if target < 0.0:
+        raise ValueError("light_white must be non-negative")
+    if ramp_end < 0:
+        raise ValueError("light_white_ramp_end must be non-negative")
+    if ramp_end == 0:
+        return target
+    progress = min(max(step / ramp_end, 0.0), 1.0)
+    progress = progress * progress * (3.0 - 2.0 * progress)
+    return target * progress
 
 
 def full_view_material_prior_loss(
@@ -422,10 +439,15 @@ class SharedGaussianTrainer:
             # not the expensive BRDF/visibility transport. Supervise the full
             # view while keeping photometric transport on the sampled patch.
             prior, tv = self._material_regularization(full_gbuffer, priors, tv_target, loss_mask)
+            light_white_weight = scheduled_light_white_weight(self.config, step)
+            light_weights = replace(
+                self.config.losses,
+                light_white=light_white_weight,
+            )
             light = emitter_regularization(
                 self.emitters,
                 self.bounds,
-                self.config.losses,
+                light_weights,
                 self.surface_points,
                 self.cameras,
             )
@@ -461,6 +483,7 @@ class SharedGaussianTrainer:
                     "prior": float(prior.detach().cpu()),
                     "tv": float(tv.detach().cpu()),
                     "light": float(light.detach().cpu()),
+                    "light_white_weight": light_white_weight,
                     "geometry_lr": lrs[0],
                     "albedo_lr": lrs[1],
                     "material_lr": lrs[2],
