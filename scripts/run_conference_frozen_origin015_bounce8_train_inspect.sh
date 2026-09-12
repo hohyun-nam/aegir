@@ -13,6 +13,7 @@ DATA="${DATA:-$WORKSPACE/datasets/aegir_nerfstudio/fipt_real_conference}"
 PRIORS="${PRIORS:-$WORKSPACE/datasets/diffusionrenderer_priors/fipt_real_conference}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$AEGIR_ROOT/outputs/aegir_conference_frozen_origin015_bounce8_train_20260821/fipt_real_conference}"
 BOUNCE_SAMPLES="${BOUNCE_SAMPLES:-8}"
+BOUNCE_CHUNK_SIZE="${BOUNCE_CHUNK_SIZE:-65536}"
 RASTER_SIZE="${RASTER_SIZE:-256}"
 GEOMETRY_LR="${GEOMETRY_LR:-0.0}"
 SCENE_CULLING="${SCENE_CULLING:-0}"
@@ -74,8 +75,13 @@ if (( RASTER_SIZE <= 0 )); then
   echo "RASTER_SIZE must be positive" >&2
   exit 1
 fi
+if (( BOUNCE_SAMPLES <= 0 || BOUNCE_CHUNK_SIZE <= 0 )); then
+  echo "BOUNCE_SAMPLES and BOUNCE_CHUNK_SIZE must be positive" >&2
+  exit 1
+fi
 
-export GEOMETRY DATA PRIORS CHECKPOINT BOUNCE_SAMPLES RASTER_SIZE GEOMETRY_LR SCENE_CULLING
+export GEOMETRY DATA PRIORS CHECKPOINT BOUNCE_SAMPLES BOUNCE_CHUNK_SIZE RASTER_SIZE
+export GEOMETRY_LR SCENE_CULLING
 export ALBEDO_INITIALIZATION NEUTRAL_ALBEDO ALBEDO_LR
 export SH_FADE_START SH_FADE_END
 export TRAINING_TRANSPORT_MODE
@@ -92,7 +98,7 @@ cd "$AEGIR_ROOT"
 echo "$(date --iso-8601=seconds) conference geometry-configurable AEGIR"
 echo "geometry: $GEOMETRY"
 echo "checkpoint: $CHECKPOINT"
-echo "geometry_lr=$GEOMETRY_LR scene_culling=$SCENE_CULLING raster_size=$RASTER_SIZE origin_offset=0.15 bounce_samples=$BOUNCE_SAMPLES albedo_initialization=$ALBEDO_INITIALIZATION neutral_albedo=$NEUTRAL_ALBEDO albedo_lr=$ALBEDO_LR six_axis_emission=$SIX_AXIS_EMISSION axis_lobe_sharpness=$EMITTER_AXIS_LOBE_SHARPNESS"
+echo "geometry_lr=$GEOMETRY_LR scene_culling=$SCENE_CULLING raster_size=$RASTER_SIZE origin_offset=0.15 bounce_samples=$BOUNCE_SAMPLES bounce_chunk_size=$BOUNCE_CHUNK_SIZE albedo_initialization=$ALBEDO_INITIALIZATION neutral_albedo=$NEUTRAL_ALBEDO albedo_lr=$ALBEDO_LR six_axis_emission=$SIX_AXIS_EMISSION axis_lobe_sharpness=$EMITTER_AXIS_LOBE_SHARPNESS"
 echo "emitter_centers_trainable=$OPTIMIZE_EMITTER_CENTERS emitter_rotations_trainable=$OPTIMIZE_EMITTER_ROTATIONS emitter_scales_trainable=$OPTIMIZE_EMITTER_SCALES emitter_scale_constraint=$CONSTRAIN_EMITTER_SCALES scale_ratio=[$EMITTER_SCALE_MIN_RATIO,$EMITTER_SCALE_MAX_RATIO] emitter_adaptation=$EMITTER_ADAPTATION"
 echo "training_transport_mode=$TRAINING_TRANSPORT_MODE sh_fade=[$SH_FADE_START,$SH_FADE_END] material_freeze=15000 light_white_target=$LIGHT_WHITE light_white_ramp_end=$LIGHT_WHITE_RAMP_END"
 
@@ -113,7 +119,7 @@ if [[ ! -s "$CHECKPOINT" ]]; then
       --prior-dir "$PRIORS" \
       --output "$CHECKPOINT" \
       --steps 20000 \
-      --bounce-chunk-size 65536 \
+      --bounce-chunk-size "$BOUNCE_CHUNK_SIZE" \
       --device cuda
   else
     echo "Starting fresh 20k training"
@@ -152,7 +158,7 @@ config.adaptive.enabled = os.environ["EMITTER_ADAPTATION"] == "1"
 config.render.num_brdf_samples = 128
 config.render.num_light_samples = 128
 config.render.num_bounce_samples = int(os.environ["BOUNCE_SAMPLES"])
-config.render.bounce_chunk_size = 65_536
+config.render.bounce_chunk_size = int(os.environ["BOUNCE_CHUNK_SIZE"])
 config.render.point_visibility = True
 config.render.trace_alpha_min = 1.0 / 255.0
 config.render.trace_transmittance_min = 0.05

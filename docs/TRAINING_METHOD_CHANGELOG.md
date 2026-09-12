@@ -90,6 +90,19 @@ The Conference wrapper exposes these settings as `ALBEDO_LR`,
 
 ## Chronological changes
 
+### 2026-09-12 — Configurable secondary-ray launch chunking
+
+- The geometry-configurable training wrapper now accepts
+  `BOUNCE_CHUNK_SIZE` and records it in the checkpoint. This execution-only
+  setting is also applied when resuming.
+- Eight secondary samples with the former 65,536-hit chunk attempted up to
+  524,288 secondary rays in one OptiX launch and segfaulted on the Blender
+  training scene. The dedicated Blender secondary-only wrapper uses a chunk of
+  8,192 hits, keeping each launch at up to 65,536 secondary rays.
+- A three-step CUDA smoke test, including exact resume, completed with six
+  emitters, fixed geometry, SH-DC albedo, `light_white=0`, explicit transport
+  weight 1, SH-proxy weight 0, eight secondary samples, and finite losses.
+
 ### 2026-09-12 — Emitter-subset relighting evaluation
 
 - `inspect --active-emitter-indices` can retain selected learned emitters while
