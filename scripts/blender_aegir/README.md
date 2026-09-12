@@ -63,6 +63,28 @@ The output already follows the AEGIR Nerfstudio/HDR contract and includes determ
 display PNGs, linear radiance NPY/EXR, metric z-depth, world normals, material AOVs,
 masks, emitter masks, object IDs, camera splits, and emitter metadata.
 
+## Split the existing six-panel ceiling emitter for relighting
+
+The `my_room` scene stores its six disconnected emissive ceiling panels in one
+`CeilingEmitter` object with one shared material. Create a separate relighting
+scene in which each existing panel has its own object, material, emitter ID,
+and lighting controls:
+
+```bash
+"$BLENDER" -b /data/my_room.blend \
+  --python-exit-code 1 \
+  --python "$ROOT/scripts/blender_aegir/split_ceiling_emitter_for_relighting.py" \
+  -- \
+  --output-blend /data/my_room_relight_6panel.blend \
+  --output-lighting /data/my_room_relight_6panel_lighting.json
+```
+
+The generated conditions include `all_on`, `left_only`, `right_only`, two
+checkerboard patterns, every single-panel-only case, and every leave-one-out
+case. Panel indices are matched by world-space distance to the six emitters in
+the Blender SH-DC/white-0 baseline checkpoint. The source blend is never
+modified, and existing outputs are never overwritten.
+
 ## Correct captures made before the render-frustum intrinsics fix
 
 Legacy square Blender captures may contain a sensor-aspect `fl_y` even though
