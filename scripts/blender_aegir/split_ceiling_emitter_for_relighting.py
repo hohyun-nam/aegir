@@ -133,6 +133,7 @@ def main() -> None:
         "right_only": condition({1, 3, 5}),
         "checker_a": condition({1, 2, 4}),
         "checker_b": condition({0, 3, 5}),
+        "panels_0_5_only": condition({0, 5}),
         "all_off": condition(set()),
     }
     for index in range(6):

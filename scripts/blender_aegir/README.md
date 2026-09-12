@@ -80,10 +80,11 @@ and lighting controls:
 ```
 
 The generated conditions include `all_on`, `left_only`, `right_only`, two
-checkerboard patterns, every single-panel-only case, and every leave-one-out
-case. Panel indices are matched by world-space distance to the six emitters in
-the Blender SH-DC/white-0 baseline checkpoint. The source blend is never
-modified, and existing outputs are never overwritten.
+checkerboard patterns, the diagonal two-panel condition `panels_0_5_only`,
+every single-panel-only case, and every leave-one-out case. Panel indices are
+matched by world-space distance to the six emitters in the Blender
+SH-DC/white-0 baseline checkpoint. The source blend is never modified, and
+existing outputs are never overwritten.
 
 ## Correct captures made before the render-frustum intrinsics fix
 
