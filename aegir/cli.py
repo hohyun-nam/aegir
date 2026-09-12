@@ -213,6 +213,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="override explicit secondary-bounce samples for this inspection only",
     )
     inspect.add_argument("--evaluation-seed", type=int, default=2026)
+    inspect.add_argument(
+        "--evaluation-seed-by-view-order",
+        action="store_true",
+        help="use selected camera order for seeds when matching separately indexed datasets",
+    )
     inspect.add_argument("--lpips-net", choices=("alex", "vgg", "squeeze"), default="alex")
     inspect.add_argument(
         "--training-sh-proxy",
@@ -237,6 +242,13 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument("--denoiser-sigma-depth", type=float, default=1.0)
     inspect.add_argument("--denoiser-normal-power", type=float, default=32.0)
     inspect.add_argument("--denoiser-depth-epsilon", type=float, default=1.0e-3)
+    inspect.add_argument(
+        "--active-emitter-indices",
+        type=int,
+        nargs="+",
+        default=None,
+        help="zero-based checkpoint emitter indices to retain for relighting",
+    )
 
     inspect_emitters = subparsers.add_parser(
         "inspect-emitters",
@@ -361,6 +373,7 @@ def main() -> None:
             bounce_samples=args.bounce_samples,
             split=args.split,
             evaluation_seed=args.evaluation_seed,
+            evaluation_seed_by_view_order=args.evaluation_seed_by_view_order,
             lpips_net=args.lpips_net,
             training_sh_proxy=args.training_sh_proxy,
             symmetric_emission=args.symmetric_emission,
@@ -370,6 +383,11 @@ def main() -> None:
             denoiser_sigma_depth=args.denoiser_sigma_depth,
             denoiser_normal_power=args.denoiser_normal_power,
             denoiser_depth_epsilon=args.denoiser_depth_epsilon,
+            active_emitter_indices=(
+                tuple(args.active_emitter_indices)
+                if args.active_emitter_indices is not None
+                else None
+            ),
         )
     elif args.command == "inspect-emitters":
         inspect_emitter_evolution(

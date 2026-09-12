@@ -90,6 +90,36 @@ The Conference wrapper exposes these settings as `ALBEDO_LR`,
 
 ## Chronological changes
 
+### 2026-09-12 — Emitter-subset relighting evaluation
+
+- `inspect --active-emitter-indices` can retain selected learned emitters while
+  leaving the Gaussian scene and materials fixed. Disabled emitters are removed
+  from direct illumination, secondary-bounce NEE, visibility/intersection, and
+  camera-visible emission.
+- `--evaluation-seed-by-view-order` assigns Monte Carlo seeds from the selected
+  camera order. This makes separately indexed datasets comparable when they
+  contain the same ordered camera poses. Per-frame metadata records the source
+  camera, and the comparison script requires matching camera names, seeds, and
+  valid masks.
+- The Blender evaluation wrapper compares the original all-six-light GT against
+  all six learned emitters and panels-0,5 GT against learned emitters 0 and 5.
+  Both use the 40 held-out test poses, 128 BRDF/light samples, one secondary
+  sample, seed 2026, and no denoiser or exposure fitting.
+- All-six reconstruction measured PSNR 19.2981, SSIM 0.5048, LPIPS 0.5203, and
+  log-HDR L1 0.0907. Panels-0,5 relighting measured PSNR 21.0178, SSIM 0.5654,
+  LPIPS 0.4604, and log-HDR L1 0.0440. The higher relighting image metrics are
+  not a direct improvement over reconstruction because the changed-light GT is
+  darker.
+- Across valid pixels, Blender panels 0 and 5 retained 43.8% of the all-six GT
+  mean scene-linear brightness; the emitter-subset render retained 41.2%. The
+  predicted and GT scene-linear lighting deltas had Pearson correlation 0.5695,
+  showing the global dimming direction transferred while local light transport
+  remained imperfect.
+
+Validation: 122 tests passed, including the CUDA/OptiX tracer tests. Ruff,
+Python compilation, shell syntax, and the 40-pair camera/seed/mask protocol
+checks passed.
+
 ### 2026-09-12 — Optional inspect denoiser and matched comparison artifacts
 
 - Added an opt-in cross-bilateral filter for the indirect linear-HDR component

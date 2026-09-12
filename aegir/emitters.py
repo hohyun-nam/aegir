@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
@@ -112,6 +113,36 @@ class AreaEmitterModel(nn.Module):
             axis_gains=self.axis_gains.detach().clone(),
             spreads=self.spreads.detach().clone(),
             falloff_powers=self.falloff_powers.detach().clone(),
+        )
+
+    def subset(self, indices: Sequence[int]) -> AreaEmitterModel:
+        """Return an inference-equivalent model containing selected emitters."""
+
+        selected = tuple(int(index) for index in indices)
+        if not selected:
+            raise ValueError("emitter subset must contain at least one index")
+        if len(set(selected)) != len(selected):
+            raise ValueError(f"emitter subset contains duplicate indices: {selected}")
+        invalid = [index for index in selected if index < 0 or index >= self.num_emitters]
+        if invalid:
+            raise IndexError(
+                f"emitter indices {invalid} are outside [0, {self.num_emitters - 1}]"
+            )
+        index = torch.tensor(selected, dtype=torch.long, device=self.centers.device)
+        return AreaEmitterModel(
+            centers=self.centers.detach().index_select(0, index),
+            scales=self.scales.detach().index_select(0, index),
+            colors=self.colors.detach().index_select(0, index),
+            quaternions=safe_normalize(self.raw_quaternions.detach(), dim=-1).index_select(0, index),
+            axis_gains=self.axis_gains.detach().index_select(0, index),
+            spreads=self.spreads.detach().index_select(0, index),
+            falloff_powers=self.falloff_powers.detach().index_select(0, index),
+            min_scale=self.min_scale,
+            min_spread=self.min_spread,
+            max_scale=self.max_scale,
+            max_color=self.max_color,
+            max_spread=self.max_spread,
+            max_falloff_power=self.max_falloff_power,
         )
 
     @torch.no_grad()

@@ -138,8 +138,15 @@ def inspect_checkpoint(
     denoiser_sigma_depth: float = 1.0,
     denoiser_normal_power: float = 32.0,
     denoiser_depth_epsilon: float = 1.0e-3,
+    active_emitter_indices: tuple[int, ...] | None = None,
+    evaluation_seed_by_view_order: bool = False,
 ) -> None:
     scene, emitters, payload = load_checkpoint(checkpoint, device)
+    original_emitter_count = emitters.num_emitters
+    if active_emitter_indices is not None:
+        emitters = emitters.subset(active_emitter_indices)
+    else:
+        active_emitter_indices = tuple(range(original_emitter_count))
     config = config_from_dict(payload["config"])
     config.render.num_brdf_samples = render_samples
     config.render.num_light_samples = render_samples
@@ -184,8 +191,9 @@ def inspect_checkpoint(
         if saved_observation is None:
             raise ValueError("LDR checkpoint has no saved learned-exposure state")
         learned_exposure = saved_observation["log_exposure"].exp()
-    for frame in dataset.frames:
-        frame_seed = evaluation_seed + frame.index
+    for view_order, frame in enumerate(dataset.frames):
+        seed_offset = view_order if evaluation_seed_by_view_order else frame.index
+        frame_seed = evaluation_seed + seed_offset
         generator = torch.Generator(device=torch.device(device)).manual_seed(frame_seed)
         rendered = render_full_frame(
             scene,
@@ -247,6 +255,7 @@ def inspect_checkpoint(
             {
                 "frame": frame.index,
                 "source_file": frame.source_frame["file_path"],
+                "source_camera": frame.source_frame.get("source_camera"),
                 "seed": frame_seed,
                 "valid_fraction": float(valid.float().mean()),
                 "psnr": psnr,
@@ -291,10 +300,17 @@ def inspect_checkpoint(
         "mean_lpips": sum(item["lpips"] for item in metrics) / len(metrics),
         "evaluation": {
             "seed": evaluation_seed,
-            "frame_seed_rule": "evaluation_seed + original_frame_index",
+            "frame_seed_rule": (
+                "evaluation_seed + selected_view_order"
+                if evaluation_seed_by_view_order
+                else "evaluation_seed + original_frame_index"
+            ),
             "num_brdf_samples": config.render.num_brdf_samples,
             "num_light_samples": config.render.num_light_samples,
             "num_bounce_samples": config.render.num_bounce_samples,
+            "original_emitter_count": original_emitter_count,
+            "active_emitter_indices": list(active_emitter_indices),
+            "active_emitter_count": emitters.num_emitters,
             "six_axis_emission": config.render.six_axis_emission,
             "emitter_axis_lobe_sharpness": config.render.emitter_axis_lobe_sharpness,
             "render_chunk_size": 256,
@@ -342,6 +358,10 @@ def inspect_checkpoint(
     }
     initial_emitter_state = payload.get("initial_emitter_state")
     if initial_emitter_state is not None:
+        index = torch.tensor(active_emitter_indices, dtype=torch.long)
+        initial_emitter_state = {
+            key: value.index_select(0, index) for key, value in initial_emitter_state.items()
+        }
         create_emitter_evolution_outputs(
             initial_emitter_state,
             emitter_state_dict(emitters),

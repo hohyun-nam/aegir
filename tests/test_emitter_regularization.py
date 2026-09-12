@@ -152,3 +152,51 @@ def test_cli_requires_explicit_override_for_non_paper_regularizers() -> None:
     assert overridden.light_view == 1.0
     assert overridden.training_transport_mode == "secondary_only"
     assert overridden.light_white_ramp_end == 15_000
+
+
+def test_emitter_subset_preserves_selected_physical_parameters() -> None:
+    emitters = AreaEmitterModel(
+        centers=torch.arange(18, dtype=torch.float32).reshape(6, 3),
+        scales=torch.arange(1, 19, dtype=torch.float32).reshape(6, 3) / 10.0,
+        colors=torch.arange(2, 20, dtype=torch.float32).reshape(6, 3),
+        axis_gains=torch.arange(1, 37, dtype=torch.float32).reshape(6, 6),
+        spreads=torch.arange(1, 19, dtype=torch.float32).reshape(6, 3) / 5.0,
+        falloff_powers=torch.arange(1, 7, dtype=torch.float32).reshape(6, 1),
+    )
+
+    subset = emitters.subset((0, 5))
+
+    assert subset.num_emitters == 2
+    torch.testing.assert_close(subset.centers, emitters.centers[[0, 5]])
+    torch.testing.assert_close(subset.scales, emitters.scales[[0, 5]])
+    torch.testing.assert_close(subset.colors, emitters.colors[[0, 5]])
+    torch.testing.assert_close(subset.axis_gains, emitters.axis_gains[[0, 5]])
+    torch.testing.assert_close(subset.spreads, emitters.spreads[[0, 5]])
+    torch.testing.assert_close(subset.falloff_powers, emitters.falloff_powers[[0, 5]])
+
+
+@pytest.mark.parametrize("indices", [(), (0, 0), (-1,), (6,)])
+def test_emitter_subset_rejects_invalid_indices(indices: tuple[int, ...]) -> None:
+    emitters = AreaEmitterModel(torch.zeros((6, 3)), torch.ones((6, 3)))
+    with pytest.raises((ValueError, IndexError)):
+        emitters.subset(indices)
+
+
+def test_inspect_cli_accepts_matched_view_order_seeds_and_emitter_subset() -> None:
+    args = build_parser().parse_args(
+        [
+            "inspect",
+            "--checkpoint",
+            "scene.pt",
+            "--nerfstudio-dir",
+            "scene",
+            "--output-dir",
+            "inspect",
+            "--evaluation-seed-by-view-order",
+            "--active-emitter-indices",
+            "0",
+            "5",
+        ]
+    )
+    assert args.evaluation_seed_by_view_order
+    assert args.active_emitter_indices == [0, 5]
