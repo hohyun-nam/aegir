@@ -63,6 +63,10 @@ The complete Blender runner enables both exclusions:
 bash scripts/run_blender_gtdepth_full_pipeline.sh
 ```
 
+Its AEGIR stage uses explicit secondary transport throughout: one secondary
+sample during 20K training and eight during the 30-view inspection. Inspection
+does not enable the training SH proxy.
+
 That runner keeps the established `0.10`-unit voxel downsampling for the GT
 depth seed so emitter masking does not reintroduce an oversized point cloud.
 

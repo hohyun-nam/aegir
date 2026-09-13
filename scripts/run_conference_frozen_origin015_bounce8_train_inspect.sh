@@ -13,6 +13,7 @@ DATA="${DATA:-$WORKSPACE/datasets/aegir_nerfstudio/fipt_real_conference}"
 PRIORS="${PRIORS:-$WORKSPACE/datasets/diffusionrenderer_priors/fipt_real_conference}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$AEGIR_ROOT/outputs/aegir_conference_frozen_origin015_bounce8_train_20260821/fipt_real_conference}"
 BOUNCE_SAMPLES="${BOUNCE_SAMPLES:-8}"
+INSPECT_BOUNCE_SAMPLES="${INSPECT_BOUNCE_SAMPLES:-$BOUNCE_SAMPLES}"
 BOUNCE_CHUNK_SIZE="${BOUNCE_CHUNK_SIZE:-65536}"
 RASTER_SIZE="${RASTER_SIZE:-256}"
 GEOMETRY_LR="${GEOMETRY_LR:-0.0}"
@@ -75,8 +76,8 @@ if (( RASTER_SIZE <= 0 )); then
   echo "RASTER_SIZE must be positive" >&2
   exit 1
 fi
-if (( BOUNCE_SAMPLES <= 0 || BOUNCE_CHUNK_SIZE <= 0 )); then
-  echo "BOUNCE_SAMPLES and BOUNCE_CHUNK_SIZE must be positive" >&2
+if (( BOUNCE_SAMPLES <= 0 || INSPECT_BOUNCE_SAMPLES <= 0 || BOUNCE_CHUNK_SIZE <= 0 )); then
+  echo "BOUNCE_SAMPLES, INSPECT_BOUNCE_SAMPLES, and BOUNCE_CHUNK_SIZE must be positive" >&2
   exit 1
 fi
 
@@ -181,12 +182,13 @@ else
   echo "Reusing completed checkpoint: $CHECKPOINT"
 fi
 
-echo "Training complete; starting 30-pose secondary inspection and PLY export"
+echo "Training complete; starting 30-pose inspection with $INSPECT_BOUNCE_SAMPLES secondary samples and PLY export"
 CHECKPOINT="$CHECKPOINT" \
 DATA="$DATA" \
 PRIORS="$PRIORS" \
 OUTPUT_ROOT="$INSPECT_ROOT" \
 RENDER_SAMPLES=128 \
+BOUNCE_SAMPLES="$INSPECT_BOUNCE_SAMPLES" \
 MAX_VIEWS=30 \
 bash "$AEGIR_ROOT/scripts/run_conference_secondary_inspect_export.sh"
 
