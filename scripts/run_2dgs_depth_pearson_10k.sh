@@ -36,7 +36,7 @@ fi
 
 "$PYTHON" "$AEGIR_ROOT/scripts/patch_2dgs_emitter_exclusion.py" \
   --two-dgs-root "$TWO_DGS_ROOT"
-if ! rg -q 'AEGIR_EMITTER_EXCLUSION_MASK' "$TWO_DGS_ROOT/train.py"; then
+if ! grep -q 'AEGIR_EMITTER_EXCLUSION_MASK' "$TWO_DGS_ROOT/train.py"; then
   echo "native 2DGS emitter-exclusion patch verification failed" >&2
   exit 1
 fi
