@@ -1,17 +1,18 @@
+#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from aegir.checkpoint import SUPPORTED_CHECKPOINT_FORMATS
+from aegir.checkpoint import SUPPORTED_CHECKPOINT_FORMATS, emitter_state_dict, emitters_from_state
 from aegir.gaussian_scene import (
-    GaussianMaterialBackend,
     SH_C0,
+    GaussianMaterialBackend,
     gaussian_surface_normals,
     planarize_gaussians,
     surfel_scales_for_3d_export,
@@ -47,6 +48,9 @@ def emitter_gaussians(state: dict, rest_channels: int, green_dc: float) -> dict[
     scales = state["scales"].float().clamp_min(1.0e-8)
     quats = safe_normalize(state["quaternions"].float(), dim=-1)
     count = centers.shape[0]
+    if scales.shape[-1] == 2:
+        thickness = scales.amin(dim=-1, keepdim=True) * 1.0e-3
+        scales = torch.cat((scales, thickness.clamp_min(1.0e-6)), dim=-1)
     f_dc = torch.zeros((count, 3), dtype=torch.float32)
     f_dc[:, 1] = green_dc
     return {
@@ -90,6 +94,7 @@ def main() -> None:
     else:
         emitter_state = payload["emitter_state"]
         scene = scene_from_checkpoint(payload)
+    emitter_state = emitter_state_dict(emitters_from_state(emitter_state, "cpu"))
     before = scene["means"].shape[0]
     scene = filter_gaussians(
         scene,

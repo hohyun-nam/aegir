@@ -11,7 +11,7 @@ new lighting model and tightly constrained camera-response variables may learn.
 
 ## Lighting representation
 
-Use the existing anisotropic area-emitter family for every light source. Ceiling
+Use the bounded planar ellipse area-emitter family for every light source. Ceiling
 fixtures, window illumination, and light arriving from outside the reconstructed
 room are represented by finite area-emitter proxies. Do not introduce a separate
 environment-map or SH-light representation unless experiments demonstrate a
@@ -34,8 +34,8 @@ Prefer fixed manual exposure and white balance during capture. If unavailable,
 learn strongly regularized per-image exposure around a shared global value so
 camera parameters cannot freely absorb lighting changes.
 
-Optimize emitter intensity, RGB, signed-axis gains, spread, and falloff first.
-Then release scale, rotation, and center at lower learning rates. New-light
+Optimize emitter scene-linear RGB radiance first. Then release the two ellipse
+radii, rotation, and center at lower learning rates. New-light
 adaptation must not inherit the reconstruction default that fixes center and
 rotation and prevents scale growth.
 

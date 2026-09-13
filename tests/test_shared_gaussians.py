@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib.util
-import math
 from dataclasses import asdict
 from pathlib import Path
 
@@ -267,7 +266,7 @@ def test_default_emitter_policy_fixes_pose_and_constrains_scale() -> None:
     config = AEGIRConfig()
     emitters = AreaEmitterModel(
         centers=torch.tensor([[1.0, 2.0, 3.0]]),
-        scales=torch.tensor([[2.0, 1.0, 0.5]]),
+        scales=torch.tensor([[2.0, 1.0]]),
     )
     parameters = configure_emitter_optimization(emitters, config)
 
@@ -275,7 +274,7 @@ def test_default_emitter_policy_fixes_pose_and_constrains_scale() -> None:
     assert not emitters.raw_quaternions.requires_grad
     assert emitters.log_scales.requires_grad
     assert any(parameter is emitters.log_colors for parameter in parameters)
-    assert any(parameter is emitters.log_axis_gains for parameter in parameters)
+    assert len(parameters) == 2
     assert not config.adaptive.enabled
 
     anchors = emitters.scales.detach().clone()
@@ -358,8 +357,27 @@ def test_thin_emitter_seed_floor_is_two_per_mille_of_scene_diagonal() -> None:
     assert AEGIRConfig().training.emitter_min_scale_fraction == pytest.approx(0.002)
 
 
+def test_blender_bbox_fits_exactly_one_planar_ellipse() -> None:
+    corners = torch.tensor(
+        [
+            [x, y, z]
+            for x in (-2.0, 2.0)
+            for y in (-1.0, 1.0)
+            for z in (-0.01, 0.01)
+        ]
+    )
+    center, scales, quaternion = initialization._fit_planar_bbox(
+        corners,
+        camera_positions=torch.tensor([[0.0, 0.0, -3.0]]),
+    )
+    emitter = AreaEmitterModel(center[None], scales[None], quaternions=quaternion[None])
+    assert torch.allclose(center, torch.zeros(3))
+    assert torch.allclose(scales, torch.tensor([2.0, 1.0]))
+    assert float(emitter.normals[0, 2].detach()) < -0.999
+
+
 def test_total_light_sampling_is_exact_and_balanced() -> None:
-    emitters = AreaEmitterModel(torch.zeros((9, 3)), torch.ones((9, 3)))
+    emitters = AreaEmitterModel(torch.zeros((9, 3)), torch.ones((9, 2)))
     points = torch.zeros((2, 3))
     q, directions, distances, ids = emitters.sample_surface_total(
         points,
@@ -397,7 +415,7 @@ def test_training_transport_crossfades_sh_to_explicit_nee(monkeypatch) -> None:
             primary_dirs, 2.0
         ),
     )
-    emitters = AreaEmitterModel(torch.zeros((1, 3)), torch.ones((1, 3)))
+    emitters = AreaEmitterModel(torch.zeros((1, 3)), torch.ones((1, 2)))
     direct, indirect = renderer._incident_transport(
         points=torch.zeros((1, 3)),
         dirs=torch.tensor([[[0.0, 0.0, 1.0]]]),
@@ -467,8 +485,9 @@ def test_explicit_secondary_nee_is_nonzero_and_differentiable() -> None:
     )
     emitters = AreaEmitterModel(
         centers=torch.tensor([[0.4, 0.1, 2.0]]),
-        scales=torch.tensor([[0.2, 0.1, 0.05]]),
+        scales=torch.tensor([[0.2, 0.1]]),
         colors=torch.full((1, 3), 2.0),
+        quaternions=torch.tensor([[0.0, 1.0, 0.0, 0.0]]),
     )
     _, indirect = renderer._incident_transport(
         points=torch.zeros((1, 3)),
@@ -508,8 +527,9 @@ def test_explicit_secondary_nee_is_chunk_size_invariant() -> None:
 
     emitters = AreaEmitterModel(
         centers=torch.tensor([[0.4, 0.1, 2.0]]),
-        scales=torch.tensor([[0.2, 0.1, 0.05]]),
+        scales=torch.tensor([[0.2, 0.1]]),
         colors=torch.full((1, 3), 2.0),
+        quaternions=torch.tensor([[0.0, 1.0, 0.0, 0.0]]),
     )
     outputs = []
     for chunk_size in (1, 65_536):
@@ -563,7 +583,7 @@ def test_inference_transport_never_requests_training_sh_and_miss_is_zero() -> No
     # clamped surface cosine is zero.
     emitters = AreaEmitterModel(
         centers=torch.tensor([[0.0, 0.0, -10.0]]),
-        scales=torch.full((1, 3), 0.01),
+        scales=torch.full((1, 2), 0.01),
     )
     direct, indirect = renderer._incident_transport(
         points=torch.zeros((1, 3)),
@@ -582,8 +602,9 @@ def test_inference_transport_never_requests_training_sh_and_miss_is_zero() -> No
 
     enclosing_emitter = AreaEmitterModel(
         centers=torch.tensor([[0.0, 0.0, 2.0]]),
-        scales=torch.full((1, 3), 0.1),
+        scales=torch.full((1, 2), 0.1),
         colors=torch.full((1, 3), 2.0),
+        quaternions=torch.tensor([[0.0, 1.0, 0.0, 0.0]]),
     )
     _, explicit_bounce = renderer._incident_transport(
         points=torch.zeros((1, 3)),
@@ -600,29 +621,32 @@ def test_inference_transport_never_requests_training_sh_and_miss_is_zero() -> No
     assert float(explicit_bounce.detach().sum()) > 0.0
 
 
-def test_rotated_anisotropic_emitter_intersection_uses_local_axes() -> None:
+def test_rotated_planar_emitter_intersection_uses_bounded_local_ellipse() -> None:
     half_angle = torch.tensor(torch.pi / 8.0)
     quaternion = torch.zeros((1, 4))
     quaternion[0, 0] = torch.cos(half_angle)
     quaternion[0, 3] = torch.sin(half_angle)
     emitters = AreaEmitterModel(
         centers=torch.zeros((1, 3)),
-        scales=torch.tensor([[3.0, 1.0, 0.5]]),
+        scales=torch.tensor([[3.0, 1.0]]),
         quaternions=quaternion,
     )
     rotation = emitters.rotations.detach()[0]
-    directions = torch.stack((rotation[:, 0], rotation[:, 1], rotation[:, 2]))
-    hit, distance, emitter_ids = emitters.intersect(torch.zeros((3, 3)), directions)
+    normal = rotation[:, 2]
+    origins = torch.stack(
+        (
+            2.5 * rotation[:, 0] + 2.0 * normal,
+            0.9 * rotation[:, 1] + 2.0 * normal,
+            1.1 * rotation[:, 1] + 2.0 * normal,
+        )
+    )
+    directions = -normal.expand_as(origins)
+    hit, distance, emitter_ids = emitters.intersect(origins, directions)
 
-    assert hit.tolist() == [True, True, True]
+    assert hit.tolist() == [True, True, False]
     assert emitter_ids.tolist() == [0, 0, 0]
-    assert torch.allclose(distance[:, 0], torch.tensor([3.0, 1.0, 0.5]), atol=1.0e-5)
-
-    distance.sum().backward()
-    assert emitters.raw_quaternions.grad is not None
-    assert emitters.log_scales.grad is not None
-    assert torch.isfinite(emitters.raw_quaternions.grad).all()
-    assert torch.isfinite(emitters.log_scales.grad).all()
+    assert torch.allclose(distance[:2, 0], torch.full((2,), 2.0), atol=1.0e-5)
+    assert torch.isinf(distance[2, 0])
 
 
 def test_emitter_radiance_apis_share_world_to_local_convention() -> None:
@@ -632,58 +656,47 @@ def test_emitter_radiance_apis_share_world_to_local_convention() -> None:
     quaternion[0, 3] = torch.sin(half_angle)
     emitters = AreaEmitterModel(
         centers=torch.zeros((1, 3)),
-        scales=torch.tensor([[3.0, 1.0, 0.5]]),
+        scales=torch.tensor([[3.0, 1.0]]),
         quaternions=quaternion,
-        spreads=torch.tensor([[0.25, 1.0, 2.0]]),
     )
     rotation = emitters.rotations.detach()[0]
-    directions = torch.stack((rotation[:, 0], rotation[:, 1], rotation[:, 2]))
+    directions = torch.stack((rotation[:, 2], -rotation[:, 2]))
     all_emitters = emitters.radiance(directions[:, None, :])[:, 0]
     selected_emitters = emitters.radiance_for_ids(
         directions,
-        torch.zeros(3, dtype=torch.long),
+        torch.zeros(2, dtype=torch.long),
     )
 
     assert torch.allclose(all_emitters, selected_emitters, atol=1.0e-7)
 
 
-def test_six_axis_emission_breaks_front_back_symmetry_and_keeps_common_rgb_scale() -> None:
+def test_planar_emission_is_constant_on_front_and_zero_on_back() -> None:
     emitters = AreaEmitterModel(
         centers=torch.zeros((1, 3)),
-        scales=torch.ones((1, 3)),
+        scales=torch.ones((1, 2)),
         colors=torch.tensor([[3.0, 2.0, 1.0]]),
-        axis_gains=torch.tensor([[4.0, 1.0, 1.0, 1.0, 1.0, 1.0]]),
     )
-    directions = torch.tensor([[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]])
-    emitter_ids = torch.zeros(2, dtype=torch.long)
-    directional = emitters.radiance_for_ids(directions, emitter_ids)
-    symmetric = emitters.radiance_for_ids(
-        directions,
-        emitter_ids,
-        use_axis_gains=False,
-    )
-
-    assert torch.allclose(emitters.axis_gains.mean(dim=-1), torch.ones(1))
-    assert torch.all(directional[0] > directional[1] * 3.5)
-    assert torch.allclose(symmetric[0], symmetric[1], atol=1.0e-7)
-    assert torch.allclose(symmetric[0], emitters.colors[0] / math.e, atol=1.0e-6)
+    directions = torch.tensor([[0.3, 0.0, 1.0], [-0.2, 0.1, 1.0], [0.0, 0.0, -1.0]])
+    radiance = emitters.radiance_for_ids(directions, torch.zeros(3, dtype=torch.long))
+    assert torch.allclose(radiance[:2], emitters.colors.expand(2, 3))
+    assert torch.count_nonzero(radiance[2]) == 0
 
 
-def test_six_axis_emission_receives_gradient() -> None:
+def test_planar_emission_receives_color_gradient() -> None:
     emitters = AreaEmitterModel(
         centers=torch.zeros((1, 3)),
-        scales=torch.ones((1, 3)),
+        scales=torch.ones((1, 2)),
         colors=torch.ones((1, 3)),
     )
     radiance = emitters.radiance_for_ids(
-        torch.tensor([[1.0, 0.0, 0.0]]),
+        torch.tensor([[0.0, 0.0, 1.0]]),
         torch.zeros(1, dtype=torch.long),
     )
     radiance.sum().backward()
 
-    assert emitters.log_axis_gains.grad is not None
-    assert torch.isfinite(emitters.log_axis_gains.grad).all()
-    assert torch.count_nonzero(emitters.log_axis_gains.grad) > 0
+    assert emitters.log_colors.grad is not None
+    assert torch.isfinite(emitters.log_colors.grad).all()
+    assert torch.count_nonzero(emitters.log_colors.grad) > 0
 
 
 def test_light_sampling_evaluates_emitter_to_surface_outgoing_direction(monkeypatch) -> None:
@@ -697,7 +710,8 @@ def test_light_sampling_evaluates_emitter_to_surface_outgoing_direction(monkeypa
     )
     emitters = AreaEmitterModel(
         centers=torch.tensor([[0.0, 0.0, 1.0]]),
-        scales=torch.full((1, 3), 0.1),
+        scales=torch.full((1, 2), 0.1),
+        quaternions=torch.tensor([[0.0, 1.0, 0.0, 0.0]]),
     )
     surface_to_emitter = torch.tensor([[[0.0, 0.0, 1.0]]])
 
@@ -747,7 +761,7 @@ def test_shared_checkpoint_round_trip(tmp_path: Path) -> None:
     output = tmp_path / "aegir.pt"
     make_export(source)
     scene = GaussianMaterialBackend(source)
-    emitters = AreaEmitterModel(torch.zeros((1, 3)), torch.full((1, 3), 0.1))
+    emitters = AreaEmitterModel(torch.zeros((1, 3)), torch.full((1, 2), 0.1))
     initial_emitter_state = emitter_state_dict(emitters)
     save_checkpoint(
         output,
@@ -764,7 +778,7 @@ def test_shared_checkpoint_round_trip(tmp_path: Path) -> None:
     assert payload["step"] == 12
     assert restored_scene.gaussian_count == scene.gaussian_count
     assert restored_emitters.num_emitters == 1
-    assert torch.allclose(restored_emitters.axis_gains, torch.ones((1, 6)))
+    assert restored_emitters.scales.shape == (1, 2)
     assert torch.allclose(restored_scene.albedo, scene.albedo)
     assert torch.allclose(
         payload["initial_emitter_state"]["centers"],
@@ -772,31 +786,34 @@ def test_shared_checkpoint_round_trip(tmp_path: Path) -> None:
     )
 
 
-def test_v8_emitter_checkpoint_loads_as_symmetric_six_axis_model(tmp_path: Path) -> None:
+def test_v8_ellipsoid_checkpoint_migrates_to_one_sided_planar_emitter(tmp_path: Path) -> None:
     source = tmp_path / "gaussians.pt"
     output = tmp_path / "v8.pt"
     make_export(source)
     scene = GaussianMaterialBackend(source)
-    emitters = AreaEmitterModel(torch.zeros((1, 3)), torch.full((1, 3), 0.1))
+    emitters = AreaEmitterModel(torch.zeros((1, 3)), torch.full((1, 2), 0.1))
     save_checkpoint(output, scene, emitters, AEGIRConfig(), 0, [], {})
     payload = torch.load(output, map_location="cpu", weights_only=False)
     payload["format"] = "aegir_shared_gaussian_v8"
-    payload["emitter_state"].pop("axis_gains")
-    payload["emitter_raw_state"].pop("log_axis_gains")
+    payload["emitter_state"] = {
+        "centers": torch.zeros((1, 3)),
+        "quaternions": torch.tensor([[1.0, 0.0, 0.0, 0.0]]),
+        "scales": torch.tensor([[2.0, 1.0, 0.1]]),
+        "colors": torch.tensor([[3.0, 2.0, 1.0]]),
+        "spreads": torch.ones((1, 3)),
+        "falloff_powers": torch.ones((1, 1)),
+        "axis_gains": torch.ones((1, 6)),
+    }
     torch.save(payload, output)
 
     _, restored_emitters, restored_payload = load_checkpoint(output, "cpu")
     assert restored_payload["format"] == "aegir_shared_gaussian_v8"
-    assert torch.allclose(restored_emitters.axis_gains, torch.ones((1, 6)))
-    direction = torch.tensor([[0.2, -0.4, 0.8]])
-    assert torch.allclose(
-        restored_emitters.radiance_for_ids(direction, torch.zeros(1, dtype=torch.long)),
-        restored_emitters.radiance_for_ids(
-            -direction,
-            torch.zeros(1, dtype=torch.long),
-        ),
-        atol=1.0e-7,
-    )
+    assert torch.allclose(restored_emitters.scales, torch.tensor([[2.0, 1.0]]))
+    front = restored_emitters.normals
+    front_radiance = restored_emitters.radiance_for_ids(front, torch.zeros(1, dtype=torch.long))
+    back_radiance = restored_emitters.radiance_for_ids(-front, torch.zeros(1, dtype=torch.long))
+    assert torch.all(front_radiance > 0.0)
+    assert torch.count_nonzero(back_radiance) == 0
 
 
 def test_v1_checkpoint_is_planarized_when_loaded(tmp_path: Path) -> None:
@@ -804,7 +821,7 @@ def test_v1_checkpoint_is_planarized_when_loaded(tmp_path: Path) -> None:
     output = tmp_path / "legacy.pt"
     make_export(source)
     scene = GaussianMaterialBackend(source)
-    emitters = AreaEmitterModel(torch.zeros((1, 3)), torch.full((1, 3), 0.1))
+    emitters = AreaEmitterModel(torch.zeros((1, 3)), torch.full((1, 2), 0.1))
     save_checkpoint(output, scene, emitters, AEGIRConfig(), 0, [], {})
     payload = torch.load(output, map_location="cpu", weights_only=False)
     payload["format"] = "aegir_shared_gaussian_v1"
@@ -932,15 +949,14 @@ def test_dbscan_and_pca_use_only_persistent_candidates(monkeypatch) -> None:
     assert torch.allclose(emitters.centers[0], torch.zeros(3), atol=1.0e-6)
     assert float(emitters.scales[0].detach().max()) == pytest.approx(2.0)
     assert float(emitters.scales[0].detach().min()) == pytest.approx(0.03)
-    # HDR observations initialize the physical amplitude.  With the default
-    # isotropic exp(-1) angular kernel, amplitude=e reproduces unit radiance.
-    assert torch.allclose(emitters.colors[0], torch.full((3,), math.e), atol=1.0e-6)
+    # A Lambertian area emitter stores radiance directly.
+    assert torch.allclose(emitters.colors[0], torch.ones(3), atol=1.0e-6)
 
 
 def test_emitter_split_replaces_parent_and_preserves_intensity() -> None:
     emitters = AreaEmitterModel(
         torch.zeros((1, 3)),
-        torch.tensor([[1.0, 0.1, 0.1]]),
+        torch.tensor([[1.0, 0.1]]),
         torch.full((1, 3), 1000.0),
     )
     initial_color_sum = emitters.colors.sum(dim=0)
@@ -961,7 +977,7 @@ def test_emitter_split_replaces_parent_and_preserves_intensity() -> None:
 def test_adaptive_split_uses_largest_scene_axis_instead_of_diagonal() -> None:
     emitters = AreaEmitterModel(
         centers=torch.zeros((1, 3)),
-        scales=torch.tensor([[2.1, 0.1, 0.1]]),
+        scales=torch.tensor([[2.1, 0.1]]),
         colors=torch.ones((1, 3)),
     )
     bounds = (torch.full((3,), -5.0), torch.full((3,), 5.0))
@@ -1017,7 +1033,7 @@ def _named_adam_state(
 def test_prune_preserves_every_survivor_adam_state_and_raw_parameter() -> None:
     emitters = AreaEmitterModel(
         centers=torch.tensor([[-0.5, 0.0, 0.0], [0.0, 0.0, 0.0], [0.5, 0.0, 0.0]]),
-        scales=torch.full((3, 3), 0.1),
+        scales=torch.full((3, 2), 0.1),
         colors=torch.tensor([[1.0, 1.0, 1.0], [1.0e-6, 1.0e-6, 1.0e-6], [2.0, 2.0, 2.0]]),
     )
     optimizer = _populate_emitter_adam(emitters)
@@ -1055,7 +1071,7 @@ def test_prune_preserves_every_survivor_adam_state_and_raw_parameter() -> None:
 def test_split_preserves_survivor_state_and_zero_initializes_children() -> None:
     emitters = AreaEmitterModel(
         centers=torch.tensor([[-0.5, 0.0, 0.0], [0.5, 0.0, 0.0]]),
-        scales=torch.tensor([[0.1, 0.1, 0.1], [1.0, 0.1, 0.1]]),
+        scales=torch.tensor([[0.1, 0.1], [1.0, 0.1]]),
         colors=torch.ones((2, 3)),
     )
     optimizer = _populate_emitter_adam(emitters)
@@ -1100,7 +1116,7 @@ def test_split_preserves_survivor_state_and_zero_initializes_children() -> None:
 def test_ambient_is_absent_and_legacy_payload_is_ignored() -> None:
     emitters = AreaEmitterModel(
         torch.zeros((1, 3)),
-        torch.ones((1, 3)),
+        torch.ones((1, 2)),
     )
     assert not hasattr(emitters, "ambient_color")
     assert all("ambient" not in name for name, _ in emitters.named_parameters())
@@ -1133,7 +1149,8 @@ def test_renderer_has_no_ambient_transport_or_outputs() -> None:
     )
     emitters = AreaEmitterModel(
         torch.tensor([[0.0, 0.0, 2.0]]),
-        torch.full((1, 3), 0.5),
+        torch.full((1, 2), 0.5),
+        quaternions=torch.tensor([[0.0, 1.0, 0.0, 0.0]]),
     )
     gbuffer = {
         "points": torch.tensor([[0.0, 0.0, 0.0]]),
@@ -1171,7 +1188,7 @@ def _camera_emission_gbuffer(surface_distance: float) -> dict[str, torch.Tensor]
     }
 
 
-def test_camera_visible_emitter_replaces_occluded_surface_shading() -> None:
+def test_camera_visible_emitter_replaces_and_skips_surface_shading(monkeypatch) -> None:
     renderer = DeferredRenderer(
         RenderConfig(
             num_brdf_samples=1,
@@ -1183,8 +1200,19 @@ def test_camera_visible_emitter_replaces_occluded_surface_shading() -> None:
     expected_radiance = torch.tensor([[4.0, 2.0, 1.0]])
     emitters = AreaEmitterModel(
         centers=torch.tensor([[0.0, 0.0, 1.0]]),
-        scales=torch.full((1, 3), 0.2),
-        colors=expected_radiance * math.e,
+        scales=torch.full((1, 2), 0.2),
+        colors=expected_radiance,
+        quaternions=torch.tensor([[0.0, 1.0, 0.0, 0.0]]),
+    )
+    monkeypatch.setattr(
+        renderer,
+        "_brdf_samples",
+        lambda *args, **kwargs: pytest.fail("BRDF sampling ran for an emitter pixel"),
+    )
+    monkeypatch.setattr(
+        renderer,
+        "_light_samples",
+        lambda *args, **kwargs: pytest.fail("light sampling ran for an emitter pixel"),
     )
 
     rendered = renderer.render(
@@ -1212,8 +1240,9 @@ def test_camera_emitter_behind_gaussian_surface_is_occluded() -> None:
     )
     emitters = AreaEmitterModel(
         centers=torch.tensor([[0.0, 0.0, 4.0]]),
-        scales=torch.full((1, 3), 0.2),
-        colors=torch.full((1, 3), math.e),
+        scales=torch.full((1, 2), 0.2),
+        colors=torch.ones((1, 3)),
+        quaternions=torch.tensor([[0.0, 1.0, 0.0, 0.0]]),
     )
 
     rendered = renderer.render(

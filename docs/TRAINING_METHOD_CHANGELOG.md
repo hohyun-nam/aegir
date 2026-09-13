@@ -53,7 +53,22 @@ Git commit: `b4392c0` (`Add six-axis emitters and corrected AEGIR transport pipe
 
 ## Current default method
 
-Effective from 2026-09-12:
+Effective from 2026-09-13:
+
+- Each physical emitter is one bounded planar ellipse with center, quaternion,
+  two radii, and scene-linear RGB radiance. It emits constant radiance from its
+  front side and zero from its back side. The old third scale, signed-axis
+  gains, angular spread, and falloff parameters are removed.
+- Blender `emitters.json` panel bounding boxes preserve one physical panel to
+  one ellipse. Stable multi-view mask components split a legacy compound mesh;
+  masks and metric depth remain the fallback when panel metadata is absent.
+- GT-depth seed construction and every native-2DGS supervision loss exclude a
+  two-pixel-dilated emitter mask. Emitter pixels do not create geometry
+  gradients or densification candidates.
+- Camera-visible emitter pixels use emission only and skip BRDF/secondary-ray
+  shading.
+- Checkpoint v13 is exactly resumable. V1-v12 are migrated to planar emitters
+  for inference/inspection only.
 
 - Emitter centers and rotations are fixed at their initialized values.
 - Emitter scales remain trainable but are clamped independently per axis to
@@ -61,7 +76,7 @@ Effective from 2026-09-12:
   cluster but cannot grow into a larger camera-visible proxy.
 - Emitter split/prune is disabled. Emitter identity and count therefore remain
   stable unless the historical mode is explicitly enabled.
-- Common emitter RGB, six signed-axis gains, spread, and falloff remain trainable.
+- Common emitter RGB radiance remains trainable.
 - Albedo initializes from DN SH DC appearance by default, using the historical
   `(0.5 + SH_C0 * DC).clamp(0.02, 0.98)` formula without an additional color
   conversion. Neutral RGB `(0.5, 0.5, 0.5)` remains an explicit option.
@@ -78,7 +93,7 @@ Effective from 2026-09-12:
 - Zero-LR groups disable gradients and do not participate in clipping. Frozen
   geometry skips BVH rebuilds/refinement, and fully frozen scene parameters
   skip the material prior/TV training terms (logged as zero, not measured errors).
-- Checkpoint v12 stores the initialization-relative emitter scale anchors and
+- Checkpoint v13 stores the initialization-relative emitter scale anchors and
   both material optimizer groups, and identifies the full-view material-prior
   objective, independent SH schedule, and active clipping semantics for exact resume.
 

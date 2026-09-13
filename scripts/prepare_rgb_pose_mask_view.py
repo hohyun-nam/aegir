@@ -4,7 +4,12 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from copy import deepcopy
 from pathlib import Path
+
+import cv2
+import numpy as np
+from PIL import Image
 
 TOP_LEVEL_SUPERVISION_KEYS = {
     "aegir_depth_convention",
@@ -24,7 +29,13 @@ FRAME_SUPERVISION_KEYS = {
     "normal_file_path",
     "radiance_hdr_file_path",
     "roughness_gt_file_path",
+    "emitter_mask_path",
 }
+
+
+def resolve(root: Path, value: str | Path) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else root / path
 
 
 def ensure_relative_symlink(source_item: Path, output_dir: Path, name: str) -> None:
@@ -55,6 +66,17 @@ def main() -> None:
         help="Optional RGB-derived mono-depth directory to expose as output/mono_depth.",
     )
     parser.add_argument(
+        "--exclude-emitter-masks",
+        action="store_true",
+        help="Write valid masks with emitter pixels removed for native 2DGS training.",
+    )
+    parser.add_argument(
+        "--emitter-mask-dilation",
+        type=int,
+        default=2,
+        help="Emitter exclusion margin in source-image pixels (default: 2).",
+    )
+    parser.add_argument(
         "--point-cloud-source",
         type=Path,
         default=None,
@@ -66,6 +88,8 @@ def main() -> None:
     output = args.output.resolve()
     if source == output:
         raise ValueError("--source and --output must be different")
+    if args.emitter_mask_dilation < 0:
+        raise ValueError("--emitter-mask-dilation must be non-negative")
     transforms_path = source / "transforms.json"
     if not transforms_path.is_file():
         raise FileNotFoundError(transforms_path)
@@ -83,6 +107,9 @@ def main() -> None:
         transforms = json.load(stream)
     for key in TOP_LEVEL_SUPERVISION_KEYS:
         transforms.pop(key, None)
+    source_frames = {
+        frame["file_path"]: deepcopy(frame) for frame in transforms["frames"]
+    }
     for frame in transforms["frames"]:
         for key in FRAME_SUPERVISION_KEYS:
             frame.pop(key, None)
@@ -125,8 +152,55 @@ def main() -> None:
         raise RuntimeError(f"supervision metadata survived sanitization: {sorted(forbidden)}")
 
     output.mkdir(parents=True, exist_ok=True)
-    for name in ("images", "masks"):
-        ensure_relative_symlink(source / name, output, name)
+    ensure_relative_symlink(source / "images", output, "images")
+    if args.exclude_emitter_masks:
+        masks_output = output / "masks"
+        if masks_output.is_symlink():
+            raise RuntimeError(
+                f"refusing to write exclusion masks through existing symlink {masks_output}"
+            )
+        masks_output.mkdir(parents=True, exist_ok=True)
+        kernel_size = 2 * args.emitter_mask_dilation + 1
+        kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+        excluded_pixels = 0
+        for index, frame in enumerate(transforms["frames"]):
+            source_frame = source_frames[frame["file_path"]]
+            image_path = source / source_frame["file_path"]
+            with Image.open(image_path) as image:
+                width, height = image.size
+            valid_path_value = source_frame.get("mask_path")
+            if valid_path_value is None:
+                valid = np.ones((height, width), dtype=bool)
+            else:
+                valid = np.asarray(
+                    Image.open(resolve(source, valid_path_value)).convert("L"),
+                    dtype=np.uint8,
+                )
+                if valid.shape != (height, width):
+                    valid = cv2.resize(valid, (width, height), interpolation=cv2.INTER_NEAREST)
+                valid = valid > 0
+            emitter_path_value = source_frame.get("emitter_mask_path")
+            if emitter_path_value is None:
+                raise KeyError(f"frame {frame['file_path']} has no emitter_mask_path")
+            emitter = np.asarray(
+                Image.open(resolve(source, emitter_path_value)).convert("L"),
+                dtype=np.uint8,
+            )
+            if emitter.shape != (height, width):
+                emitter = cv2.resize(emitter, (width, height), interpolation=cv2.INTER_NEAREST)
+            emitter = emitter > 0
+            if args.emitter_mask_dilation > 0:
+                emitter = cv2.dilate(emitter.astype(np.uint8), kernel, iterations=1).astype(bool)
+            combined = valid & ~emitter
+            excluded_pixels += int((valid & emitter).sum())
+            mask_name = f"{index:06d}_{Path(frame['file_path']).stem}.png"
+            Image.fromarray((combined.astype(np.uint8) * 255), mode="L").save(
+                masks_output / mask_name
+            )
+            frame["mask_path"] = f"masks/{mask_name}"
+        print(f"emitter-excluded valid pixels: {excluded_pixels}")
+    else:
+        ensure_relative_symlink(source / "masks", output, "masks")
     if point_cloud_source is None:
         ensure_relative_symlink(source / "colmap", output, "colmap")
     else:

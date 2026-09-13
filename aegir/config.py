@@ -30,14 +30,12 @@ class RenderConfig:
     trace_origin_offset: float = 0.05
     tonemap_exposure: float = 1.0
     point_visibility: bool = True
-    # Composite learned emitter self-emission when an emitter ellipsoid is hit
+    # Composite learned emitter self-emission when a planar ellipse is hit
     # before the camera-visible Gaussian surface.
     camera_visible_emitters: bool = True
-    # Learn one positive scalar radiance gain for each local signed emitter
-    # axis (+X, -X, +Y, -Y, +Z, -Z). Their mean is fixed to one so `colors`
-    # remains the common RGB/intensity parameter. Disable for the symmetric
-    # AEGIR Equation 1 baseline.
-    six_axis_emission: bool = True
+    # Legacy checkpoint/CLI fields. Planar emitters use one-sided constant
+    # radiance, so these values are accepted but ignored.
+    six_axis_emission: bool = False
     emitter_axis_lobe_sharpness: float = 12.0
     visibility_occluders: int = 2048
     visibility_radius: float = 0.035

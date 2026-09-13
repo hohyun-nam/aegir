@@ -12,11 +12,9 @@ from torch import Tensor
 
 from .math_utils import quat_to_matrix, safe_normalize
 
-
 INITIAL_COLOR = (0, 220, 255)
 FINAL_COLOR = (80, 255, 80)
 MOVE_COLOR = (255, 220, 40)
-AXIS_GAIN_LABELS = ("+X", "-X", "+Y", "-Y", "+Z", "-Z")
 
 
 def match_emitter_centers(initial: Tensor, final: Tensor) -> list[tuple[int, int, float]]:
@@ -79,16 +77,15 @@ def create_emitter_evolution_outputs(
 
 
 def _cpu_state(state: dict[str, Tensor]) -> dict[str, Tensor]:
-    return {key: value.detach().cpu().float() for key, value in state.items()}
+    return {
+        key: value.detach().cpu().float()
+        for key, value in state.items()
+        if torch.is_tensor(value)
+    }
 
 
 def _emitter_record(state: dict[str, Tensor], index: int) -> dict[str, Any]:
     scales = state["scales"][index]
-    axis_gains = state.get("axis_gains")
-    if axis_gains is None:
-        directional = torch.ones(6)
-    else:
-        directional = axis_gains[index]
     record = {
         "index": index,
         "center": state["centers"][index].tolist(),
@@ -96,11 +93,10 @@ def _emitter_record(state: dict[str, Tensor], index: int) -> dict[str, Any]:
         "anisotropy": float(scales.max() / scales.min().clamp_min(1.0e-8)),
         "quaternion": state["quaternions"][index].tolist(),
         "color": state["colors"][index].tolist(),
-        "common_rgb": state["colors"][index].tolist(),
-        "axis_gains": {
-            label: float(value)
-            for label, value in zip(AXIS_GAIN_LABELS, directional, strict=True)
-        },
+        "emitting_normal": quat_to_matrix(
+            safe_normalize(state["quaternions"][index : index + 1], dim=-1)
+        )[0, :, 2].tolist(),
+        "area": float(math.pi * scales.prod()),
     }
     return record
 
@@ -114,8 +110,8 @@ def _evolution_summary(
         "initial_count": int(initial["centers"].shape[0]),
         "final_count": int(final["centers"].shape[0]),
         "legend": {
-            "initial": "cyan dashed ellipsoid",
-            "final": "fluorescent green solid ellipsoid",
+            "initial": "cyan dashed planar ellipse",
+            "final": "fluorescent green solid planar ellipse",
             "movement": "yellow arrow",
         },
         "initial_emitters": [
@@ -135,11 +131,12 @@ def _evolution_summary(
     }
 
 
-def _ellipsoid_covariance(state: dict[str, Tensor], index: int) -> Tensor:
+def _planar_covariance(state: dict[str, Tensor], index: int) -> Tensor:
     quaternion = safe_normalize(state["quaternions"][index : index + 1], dim=-1)
     rotation = quat_to_matrix(quaternion)[0]
     scales = state["scales"][index].clamp_min(1.0e-8)
-    return rotation @ torch.diag(scales.square()) @ rotation.T
+    tangents = rotation[:, :2]
+    return tangents @ torch.diag(scales.square()) @ tangents.T
 
 
 def _ellipse_outline(center: Tensor, covariance: Tensor, samples: int = 96) -> Tensor:
@@ -192,7 +189,17 @@ def _draw_world_projections(
             (panel_height - 2 * margin) / range_y,
         )
 
-        def project(points: Tensor) -> list[tuple[float, float]]:
+        def project(
+            points: Tensor,
+            left: int = left,
+            axis_x: int = axis_x,
+            axis_y: int = axis_y,
+            lo_x: float = lo_x,
+            hi_x: float = hi_x,
+            lo_y: float = lo_y,
+            hi_y: float = hi_y,
+            scale: float = scale,
+        ) -> list[tuple[float, float]]:
             x = left + panel_width * 0.5 + (points[..., axis_x] - (lo_x + hi_x) * 0.5) * scale
             y = panel_height * 0.5 - (points[..., axis_y] - (lo_y + hi_y) * 0.5) * scale
             return list(zip(x.tolist(), y.tolist(), strict=True))
@@ -217,7 +224,7 @@ def _draw_world_projections(
             (final, FINAL_COLOR, False, "F"),
         ):
             for index in range(state["centers"].shape[0]):
-                covariance = _ellipsoid_covariance(state, index)
+                covariance = _planar_covariance(state, index)
                 covariance_2d = covariance[[axis_x, axis_y]][:, [axis_x, axis_y]]
                 outline_world_2d = _ellipse_outline(
                     state["centers"][index, [axis_x, axis_y]], covariance_2d
@@ -245,7 +252,7 @@ def _draw_world_projections(
     canvas.save(path)
 
 
-def _project_ellipsoid(
+def _project_planar_ellipse(
     state: dict[str, Tensor],
     index: int,
     camera: dict[str, Any],
@@ -264,7 +271,7 @@ def _project_ellipsoid(
     cy = float(camera["cy"])
     x, y = float(center_camera[0]), float(center_camera[1])
     center_pixel = (fx * x / depth + cx, -fy * y / depth + cy)
-    covariance_world = _ellipsoid_covariance(state, index)
+    covariance_world = _planar_covariance(state, index)
     covariance_camera = (
         rotation_camera_from_world @ covariance_world @ rotation_camera_from_world.T
     )
@@ -295,11 +302,11 @@ def _draw_camera_overlay(
     canvas = Image.fromarray(image)
     draw = ImageDraw.Draw(canvas)
     projected_initial = {
-        index: _project_ellipsoid(initial, index, frame.camera)
+        index: _project_planar_ellipse(initial, index, frame.camera)
         for index in range(initial["centers"].shape[0])
     }
     projected_final = {
-        index: _project_ellipsoid(final, index, frame.camera)
+        index: _project_planar_ellipse(final, index, frame.camera)
         for index in range(final["centers"].shape[0])
     }
     for initial_index, final_index, _ in matches:

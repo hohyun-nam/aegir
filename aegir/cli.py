@@ -180,13 +180,13 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument(
         "--symmetric-emission",
         action="store_true",
-        help="disable learned signed-axis gains and recover symmetric AEGIR emission",
+        help="deprecated compatibility flag; planar emission is always one-sided Lambertian",
     )
     train.add_argument(
         "--emitter-axis-lobe-sharpness",
         type=float,
         default=12.0,
-        help="soft assignment sharpness for the six local signed emitter axes",
+        help="deprecated compatibility value ignored by planar emitters",
     )
     train.add_argument("--no-indirect", action="store_true")
 

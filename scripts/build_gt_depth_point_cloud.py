@@ -44,6 +44,17 @@ def main() -> None:
     parser.add_argument("--max-depth", type=float, default=15.0)
     parser.add_argument("--statistical-nb-neighbors", type=int, default=20)
     parser.add_argument("--statistical-std-ratio", type=float, default=2.0)
+    parser.add_argument(
+        "--exclude-emitter-masks",
+        action="store_true",
+        help="Remove emitter-mask pixels before back-projection.",
+    )
+    parser.add_argument(
+        "--emitter-mask-dilation",
+        type=int,
+        default=2,
+        help="Emitter exclusion margin in source-image pixels (default: 2).",
+    )
     args = parser.parse_args()
 
     data = args.data.resolve()
@@ -54,6 +65,8 @@ def main() -> None:
         raise ValueError("--voxel-size must be positive")
     if not (0 <= args.min_depth < args.max_depth):
         raise ValueError("depth limits must satisfy 0 <= min < max")
+    if args.emitter_mask_dilation < 0:
+        raise ValueError("--emitter-mask-dilation must be non-negative")
 
     transforms_path = data / "transforms.json"
     with transforms_path.open("r", encoding="utf-8") as stream:
@@ -97,6 +110,26 @@ def main() -> None:
                     mask_image, (width, height), interpolation=cv2.INTER_NEAREST
                 )
             mask = mask_image > 0
+
+        if args.exclude_emitter_masks:
+            emitter_path_value = frame.get("emitter_mask_path")
+            if emitter_path_value is None:
+                raise KeyError(f"frame {frame['file_path']} has no emitter_mask_path")
+            emitter_mask = np.asarray(
+                Image.open(resolve(data, emitter_path_value)).convert("L"), dtype=np.uint8
+            )
+            if emitter_mask.shape != (height, width):
+                emitter_mask = cv2.resize(
+                    emitter_mask, (width, height), interpolation=cv2.INTER_NEAREST
+                )
+            emitter_mask = emitter_mask > 0
+            if args.emitter_mask_dilation > 0:
+                kernel_size = 2 * args.emitter_mask_dilation + 1
+                kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+                emitter_mask = cv2.dilate(
+                    emitter_mask.astype(np.uint8), kernel, iterations=1
+                ).astype(bool)
+            mask &= ~emitter_mask
 
         rows = np.arange(0, height, args.pixel_stride, dtype=np.int32)
         cols = np.arange(0, width, args.pixel_stride, dtype=np.int32)

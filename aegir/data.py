@@ -21,6 +21,8 @@ class FrameData:
     mask: Tensor
     camera: dict[str, Any]
     priors: dict[str, Tensor]
+    emitter_mask: Tensor | None
+    metric_depth: Tensor | None
     radiance_hdr: Tensor | None
     ldr_exposure_scale: float
     source_frame: dict[str, Any]
@@ -224,10 +226,32 @@ class MultiViewSceneDataset:
         self.selected_indices = tuple(selected_indices)
         dataparser = load_dataparser_transform(infer_dataparser_transform_path(self.checkpoint))
         saved_to_model = saved_pose_to_model_transform(dataparser, metadata)
+        self.emitter_definitions = self._load_emitter_definitions(saved_to_model)
         self.frames = [
             self._load_frame(index, source_frames[index], metadata, saved_to_model)
             for index in selected_indices
         ]
+
+    def _load_emitter_definitions(
+        self, saved_to_model: tuple[Tensor, float]
+    ) -> list[dict[str, Any]]:
+        path = self.root / "emitters.json"
+        if not path.is_file():
+            return []
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        matrix, scale = saved_to_model
+        rotation, translation = matrix[:, :3], matrix[:, 3]
+        definitions = []
+        for emitter in payload.get("emitters", []):
+            corners = emitter.get("world_bbox_corners")
+            if corners is None:
+                continue
+            world = torch.as_tensor(corners, dtype=torch.float32)
+            if world.ndim != 2 or world.shape[-1] != 3:
+                raise ValueError(f"invalid world_bbox_corners in {path}")
+            model = (world @ rotation.T + translation) * float(scale)
+            definitions.append({**emitter, "model_bbox_corners": model})
+        return definitions
 
     def _load_frame(
         self,
@@ -273,6 +297,38 @@ class MultiViewSceneDataset:
         }
         camera = transform_camera(camera, saved_to_model)
         priors: dict[str, Tensor] = {}
+        emitter_mask = None
+        emitter_mask_path = frame.get("emitter_mask_path")
+        if emitter_mask_path is not None:
+            source = Image.open(self.root / emitter_mask_path).convert("L")
+            if source.size != (source_w, source_h):
+                raise ValueError(
+                    f"emitter mask {self.root / emitter_mask_path} has size {source.size}, "
+                    f"expected {(source_w, source_h)}"
+                )
+            emitter_mask = resize_mask(
+                torch.from_numpy(np.asarray(source).copy()) > 0,
+                (self.image_size, self.image_size),
+            )
+        metric_depth = None
+        depth_path = frame.get("depth_file_path")
+        if depth_path is not None:
+            path = self.root / depth_path
+            if path.suffix.lower() == ".npy":
+                depth = np.load(path, allow_pickle=False).astype(np.float32)
+            else:
+                depth = np.asarray(Image.open(path), dtype=np.float32)
+                depth *= float(metadata.get("depth_unit_scale_factor", 1.0))
+            depth = np.squeeze(depth)
+            if depth.shape != (source_h, source_w):
+                raise ValueError(
+                    f"metric depth {path} has shape {depth.shape}, expected {(source_h, source_w)}"
+                )
+            metric_depth = resize_map(
+                torch.from_numpy(depth.copy()).unsqueeze(-1),
+                (self.image_size, self.image_size),
+            )[..., 0]
+            metric_depth = metric_depth * float(saved_to_model[1])
         radiance_hdr = None
         if self.prior_dir is not None:
             prior_path = self.prior_dir / f"frame_{index:04d}.pt"
@@ -305,7 +361,18 @@ class MultiViewSceneDataset:
         elif self.observation_policy["domain"] == "linear_hdr":
             raise ValueError(f"HDR observation declared but missing for frame {index}")
         exposure_scale = frame_exposure_scale(self.observation_policy, frame)
-        return FrameData(index, target, mask, camera, priors, radiance_hdr, exposure_scale, frame)
+        return FrameData(
+            index,
+            target,
+            mask,
+            camera,
+            priors,
+            emitter_mask,
+            metric_depth,
+            radiance_hdr,
+            exposure_scale,
+            frame,
+        )
 
     def __len__(self) -> int:
         return len(self.frames)

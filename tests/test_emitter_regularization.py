@@ -12,7 +12,7 @@ from aegir.losses import emitter_regularization
 def _emitter() -> AreaEmitterModel:
     return AreaEmitterModel(
         centers=torch.tensor([[2.0, 0.0, -1.0]]),
-        scales=torch.tensor([[0.2, 0.2, 0.2]]),
+        scales=torch.tensor([[0.2, 0.2]]),
         colors=torch.tensor([[2.0, 1.0, 1.0]]),
     )
 
@@ -48,7 +48,7 @@ def test_non_paper_emitter_regularizers_are_disabled_by_default() -> None:
 @pytest.mark.parametrize(
     ("weight_name", "expected"),
     [
-        ("light_area", 0.01),
+        ("light_area", 1.0 / 150.0),
         ("light_white", 1.0),
         ("light_bounds", 1.0 / (12.0**0.5)),
     ],
@@ -73,7 +73,7 @@ def test_paper_area_loss_is_squared_norm_in_normalized_scene_coordinates() -> No
     base = emitter_regularization(
         AreaEmitterModel(
             centers=torch.zeros((1, 3)),
-            scales=torch.tensor([[0.2, 0.4, 0.6]]),
+            scales=torch.tensor([[0.2, 0.4]]),
         ),
         (torch.full((3,), -1.0), torch.full((3,), 1.0)),
         weights,
@@ -81,12 +81,12 @@ def test_paper_area_loss_is_squared_norm_in_normalized_scene_coordinates() -> No
     scaled = emitter_regularization(
         AreaEmitterModel(
             centers=torch.zeros((1, 3)),
-            scales=torch.tensor([[2.0, 4.0, 6.0]]),
+            scales=torch.tensor([[2.0, 4.0]]),
         ),
         (torch.full((3,), -10.0), torch.full((3,), 10.0)),
         weights,
     )
-    expected = (0.2**2 + 0.4**2 + 0.6**2) / (12.0)
+    expected = (0.2**2 + 0.4**2) / (12.0)
     assert base.item() == pytest.approx(expected)
     assert scaled.item() == pytest.approx(expected)
 
@@ -157,11 +157,8 @@ def test_cli_requires_explicit_override_for_non_paper_regularizers() -> None:
 def test_emitter_subset_preserves_selected_physical_parameters() -> None:
     emitters = AreaEmitterModel(
         centers=torch.arange(18, dtype=torch.float32).reshape(6, 3),
-        scales=torch.arange(1, 19, dtype=torch.float32).reshape(6, 3) / 10.0,
+        scales=torch.arange(1, 13, dtype=torch.float32).reshape(6, 2) / 10.0,
         colors=torch.arange(2, 20, dtype=torch.float32).reshape(6, 3),
-        axis_gains=torch.arange(1, 37, dtype=torch.float32).reshape(6, 6),
-        spreads=torch.arange(1, 19, dtype=torch.float32).reshape(6, 3) / 5.0,
-        falloff_powers=torch.arange(1, 7, dtype=torch.float32).reshape(6, 1),
     )
 
     subset = emitters.subset((0, 5))
@@ -170,14 +167,11 @@ def test_emitter_subset_preserves_selected_physical_parameters() -> None:
     torch.testing.assert_close(subset.centers, emitters.centers[[0, 5]])
     torch.testing.assert_close(subset.scales, emitters.scales[[0, 5]])
     torch.testing.assert_close(subset.colors, emitters.colors[[0, 5]])
-    torch.testing.assert_close(subset.axis_gains, emitters.axis_gains[[0, 5]])
-    torch.testing.assert_close(subset.spreads, emitters.spreads[[0, 5]])
-    torch.testing.assert_close(subset.falloff_powers, emitters.falloff_powers[[0, 5]])
 
 
 @pytest.mark.parametrize("indices", [(), (0, 0), (-1,), (6,)])
 def test_emitter_subset_rejects_invalid_indices(indices: tuple[int, ...]) -> None:
-    emitters = AreaEmitterModel(torch.zeros((6, 3)), torch.ones((6, 3)))
+    emitters = AreaEmitterModel(torch.zeros((6, 3)), torch.ones((6, 2)))
     with pytest.raises((ValueError, IndexError)):
         emitters.subset(indices)
 

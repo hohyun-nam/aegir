@@ -24,7 +24,7 @@ from .config import AEGIRConfig, LossWeights, config_from_dict
 from .data import MultiViewSceneDataset
 from .emitters import AreaEmitterModel
 from .gaussian_scene import GaussianMaterialBackend
-from .initialization import seed_emitters_from_gbuffer_views
+from .initialization import seed_emitters_from_gbuffer_views, seed_planar_emitters_from_masks
 from .irgs_tracer import IRGSVisibilityTracer
 from .losses import (
     edge_aware_tv,
@@ -66,9 +66,6 @@ def configure_emitter_optimization(
         "raw_quaternions": training.optimize_emitter_rotations,
         "log_scales": training.optimize_emitter_scales,
         "log_colors": True,
-        "log_axis_gains": True,
-        "log_spreads": True,
-        "log_falloff_powers": True,
     }
     parameters = []
     for name, parameter in emitters.named_parameters():
@@ -180,6 +177,16 @@ def initialize_emitters(
     config: AEGIRConfig,
     device: str,
 ) -> AreaEmitterModel:
+    masked_emitters = seed_planar_emitters_from_masks(
+        dataset.frames,
+        (bounds[0].cpu(), bounds[1].cpu()),
+        emitter_definitions=dataset.emitter_definitions,
+        min_scale_fraction=config.training.emitter_min_scale_fraction,
+        max_emitters=config.adaptive.max_emitters,
+    )
+    if masked_emitters is not None:
+        return masked_emitters.to(device)
+
     targets: list[Tensor] = []
     gbuffers: list[dict[str, Tensor]] = []
     samples: list[dict[str, Tensor]] = []
@@ -377,7 +384,18 @@ class SharedGaussianTrainer:
                 rasterize_mode=self.config.raster.rasterize_mode,
             )
             self._accumulate_scene_culling_stats(full_gbuffer)
-            loss_mask = mask & full_gbuffer["valid_mask"].bool()
+            gaussian_valid = full_gbuffer["valid_mask"].bool()
+            emitter_pixels = (
+                frame.emitter_mask.to(self.device)
+                if frame.emitter_mask is not None
+                else torch.zeros_like(mask)
+            )
+            # Analytic emission remains photometrically supervised even when
+            # native 2DGS intentionally has no Gaussian at that pixel. Scene
+            # material/TV losses exclude it so geometry cannot grow back into
+            # the emitter footprint.
+            photo_mask = mask & (gaussian_valid | emitter_pixels)
+            scene_loss_mask = mask & gaussian_valid & ~emitter_pixels
             if self.observation_policy["domain"] == "linear_hdr":
                 if target_hdr is None:
                     raise RuntimeError("linear-HDR training frame has no HDR observation")
@@ -391,12 +409,12 @@ class SharedGaussianTrainer:
             full_focus = focus_map(
                 focus_target,
                 self.config.losses.focus_lambda,
-                mask=loss_mask,
+                mask=photo_mask,
             )
             patch, patch_target, patch_mask, patch_focus = self._select_patch(
                 full_gbuffer,
                 photo_target,
-                loss_mask,
+                photo_mask,
                 full_focus,
                 step,
             )
@@ -438,7 +456,9 @@ class SharedGaussianTrainer:
             # Material maps require only differentiable Gaussian rasterization,
             # not the expensive BRDF/visibility transport. Supervise the full
             # view while keeping photometric transport on the sampled patch.
-            prior, tv = self._material_regularization(full_gbuffer, priors, tv_target, loss_mask)
+            prior, tv = self._material_regularization(
+                full_gbuffer, priors, tv_target, scene_loss_mask
+            )
             light_white_weight = scheduled_light_white_weight(self.config, step)
             light_weights = replace(
                 self.config.losses,

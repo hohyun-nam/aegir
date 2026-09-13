@@ -68,8 +68,9 @@ def test_fixed_generator_reproduces_monte_carlo_render() -> None:
     renderer = DeferredRenderer(config)
     emitters = AreaEmitterModel(
         centers=torch.tensor([[0.0, 0.0, 2.0]]),
-        scales=torch.tensor([[0.5, 0.5, 0.5]]),
+        scales=torch.tensor([[0.5, 0.5]]),
         colors=torch.tensor([[4.0, 4.0, 4.0]]),
+        quaternions=torch.tensor([[0.0, 1.0, 0.0, 0.0]]),
     )
     gbuffer = {
         "points": torch.zeros((4, 3)),

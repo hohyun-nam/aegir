@@ -23,7 +23,7 @@ One geometry checkpoint provides a single set of trainable planar 2D Gaussians:
 
 - geometry: mean, two tangent log-scales, quaternion, opacity logit
 - material: albedo, roughness, metallic per Gaussian
-- lighting: shared anisotropic area emitters
+- lighting: one bounded planar 2D ellipse per physical area emitter
 
 Every camera differentiably rasterizes these shared Gaussian attributes into a
 temporary G-buffer. There are no trainable per-camera material maps.
@@ -72,6 +72,8 @@ compatibility changes:
 - a SciPy nearest-neighbor fallback in place of the legacy `simple-knn` CUDA
   extension, while retaining the installed official 2DGS rasterizer
 - current Matplotlib canvas compatibility
+- emitter-mask exclusion from the seed PLY and every native-2DGS loss, which
+  also prevents emitter pixels from driving densification
 
 Run a 10K native 2DGS initialization for conference with:
 
@@ -145,9 +147,9 @@ stored separately from visualization PNGs.
   gradient clipping. Fully frozen scene materials skip prior/TV computation;
   BVH rebuilds occur only after geometry updates, including the final update
   before freeze. Frozen geometry also disables scene refinement
-- the current decomposition default fixes emitter centers and rotations, learns
-  scale only within `0.1x-1.0x` of its initialization, and disables emitter
-  split/prune; RGB, six signed-axis gains, spread, and falloff remain trainable
+- the current decomposition default fixes planar-emitter centers and rotations,
+  learns the two ellipse radii only within `0.1x-1.0x` of initialization,
+  learns scene-linear RGB radiance, and disables emitter split/prune
 - the historical adaptive-emitter baseline remains available with
   `--optimize-emitter-centers --optimize-emitter-rotations
   --unconstrained-emitter-scales --enable-emitter-adaptation`; adaptive
@@ -160,13 +162,12 @@ stored separately from visualization PNGs.
 
 ## Exact checkpoint resume
 
-Trainer-produced v12 checkpoints store the independent SH fade schedule and
+Trainer-produced v13 checkpoints store planar ellipse emitters, the independent SH fade schedule and
 identify active-parameter clipping semantics, along with frozen DN full-SH features, the
 three Adam optimizer states, Python, NumPy, CPU/CUDA RNG states, the next global
 step, fixed scene bounds and surface anchors, selected training frames, and
 emitter scale anchors, adaptation, and scene-refinement gradient/visibility state.
-V10 also stores the six learned signed-axis emitter gains and the split
-albedo/material optimizer groups. Resume to a
+Resume to a
 final global-step target with:
 
 ```bash
@@ -184,10 +185,14 @@ final global-step target with:
 training config is authoritative; resume only changes that target and the
 output path. Exact resume deliberately rejects changed DN checkpoints, dataset
 or prior paths, selected frame identities, and visible CUDA-device counts.
-Checkpoint formats v1-v11 remain loadable for inspection/inference but cannot be
+Checkpoint formats v1-v12 remain loadable for inspection/inference but cannot be
 passed to `--resume`, because their training semantics predate the current
 active-parameter clipping semantics. `--emitter-checkpoint` is only an emitter warm start and is
 mutually exclusive with exact resume.
+
+The emitter equations, mask preparation, migration behavior, and retraining
+requirement are documented in
+[`docs/PLANAR_EMITTER_AND_MASK_EXCLUSION.md`](docs/PLANAR_EMITTER_AND_MASK_EXCLUSION.md).
 
 The baseline method, local experiment defaults, and every intentional training
 change are tracked in [`docs/TRAINING_METHOD_CHANGELOG.md`](docs/TRAINING_METHOD_CHANGELOG.md).

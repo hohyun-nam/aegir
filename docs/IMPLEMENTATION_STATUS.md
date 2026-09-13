@@ -21,14 +21,18 @@ is not required by the shared-Gaussian implementation.
   scene-exposure plus Reinhard+sRGB fallback
 - training/evaluation share the same LDR transform, and raw float HDR/metric
   arrays remain separate from display PNGs
-- HDR bright-region, multi-view-persistent DBSCAN/PCA emitter initialization
+- one bounded, one-sided Lambertian planar ellipse per physical emitter;
+  Blender panel bounding boxes preserve one-to-one identity; stable multi-view
+  mask components split legacy compound meshes, with mask/depth PCA as fallback
+- emitter masks exclude fixtures from GT-depth seed points and all native-2DGS
+  losses, preventing emitter-region densification
 - separate geometry, material, and emitter Adam optimizers, with dedicated
   albedo (`3e-3`) and roughness/metallic (`1e-3`) parameter groups
 - paper 0-5K / 5-15K / 15-20K learning-rate curriculum
 - full-view, validity-aware focus-map computation followed by exact training-patch crop
 - current default emitter optimization fixes initialized center/rotation,
-  constrains scale to `0.1x-1.0x` of its seed, and disables split/prune while
-  learning RGB, six-axis gains, spread, and falloff; historical adaptive
+  constrains two ellipse radii to `0.1x-1.0x` of their seed, and disables
+  split/prune while learning RGB radiance; historical adaptive
   split/prune remains opt-in
 - DN-style scene-Gaussian refinement: after warm-up and full training-view
   statistics coverage, remove only opacity below 0.005; replace high-gradient
@@ -40,12 +44,12 @@ is not required by the shared-Gaussian implementation.
 - differentiable explicit-emitter NEE at the first IRGS hit, cross-faded 0-to-1
   over steps 5K-15K and used exclusively after step 15K and at inference; no SH fallback
 - shared checkpoint containing all Gaussian geometry and BRDF tensors
-- exact-resume v11 checkpoint containing frozen full SH, six-axis emission,
+- exact-resume v13 checkpoint containing frozen full SH and planar emitters,
   emitter scale anchors, and geometry/material/emitter Adam states,
   Python/NumPy/CPU/CUDA RNG states, next global step, fixed bounds and surface
   anchors, frame identity, emitter-adaptation state, and accumulated scene-refinement state
 - `train-gaussian-scene --resume` restarts at the saved global step without
-  replaying learning-rate, adaptation, or refinement schedules; v1-v9 remain inference-only
+  replaying learning-rate, adaptation, or refinement schedules; v1-v12 remain inference-only
 - all-view inspection by re-rasterization
 - checkpointed pre-training emitter state and automatic initial/final emitter
   comparison in world and camera views
@@ -58,13 +62,13 @@ New checkpoints retain the exact emitter state captured immediately before the
 first optimizer step. Standard inspection writes:
 
 - `emitter_evolution_world.png`: XY/XZ/YZ projections of initial and final
-  oriented ellipsoids
-- `emitter_evolution_frames/`: the same ellipsoids projected into every camera
+  oriented planar ellipses
+- `emitter_evolution_frames/`: the same ellipses projected into every camera
 - `emitter_evolution_sequence.gif`: all camera overlays as an animation
-- `emitter_evolution.json`: centers, three-axis scales, quaternions, anisotropy,
+- `emitter_evolution.json`: centers, two radii, normal, area, quaternions, anisotropy,
   and matched center movement
 
-The cyan dashed ellipsoid is the initialization, the green solid ellipsoid is
+The cyan dashed ellipse is the initialization, the green solid ellipse is
 the trained result, and the yellow segment connects the nearest one-to-one
 match. Legacy checkpoints can reconstruct initialization through
 `python -m aegir.cli inspect-emitters` when given the original DN scene and

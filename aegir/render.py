@@ -71,40 +71,36 @@ class DeferredRenderer:
         if occluder_points is not None:
             occluder_points = occluder_points.reshape(-1, occluder_points.shape[-1])
 
-        brdf_direct, brdf_indirect, brdf_count = self._brdf_samples(
-            points,
-            normals,
-            view_dirs,
-            albedo,
-            roughness,
-            metallic,
-            emitters,
-            occluder_points,
-            generator,
-            transport_mode,
-            training_proxy_weight,
-        )
-        light_direct, light_indirect, light_count = self._light_samples(
-            points,
-            normals,
-            view_dirs,
-            albedo,
-            roughness,
-            metallic,
-            emitters,
-            occluder_points,
-            generator,
-            transport_mode,
-            training_proxy_weight,
-        )
-        sample_count = float(brdf_count + light_count)
-        direct_hdr = (brdf_direct + light_direct) / sample_count
-        indirect_hdr = (brdf_indirect + light_indirect) / sample_count
         emission_hdr, emitter_mask = self._camera_visible_emission(gbuffer, emitters)
-        emitter_mask_flat = emitter_mask.reshape(-1, 1)
-        surface_mask = 1.0 - emitter_mask_flat
-        direct_hdr = direct_hdr * surface_mask
-        indirect_hdr = indirect_hdr * surface_mask
+        surface_ids = torch.nonzero(
+            emitter_mask.reshape(-1) < 0.5, as_tuple=False
+        ).flatten()
+        direct_hdr = torch.zeros_like(albedo)
+        indirect_hdr = torch.zeros_like(albedo)
+        if surface_ids.numel() > 0:
+            surface_values = [
+                value.index_select(0, surface_ids)
+                for value in (points, normals, view_dirs, albedo, roughness, metallic)
+            ]
+            brdf_direct, brdf_indirect, brdf_count = self._brdf_samples(
+                *surface_values,
+                emitters,
+                occluder_points,
+                generator,
+                transport_mode,
+                training_proxy_weight,
+            )
+            light_direct, light_indirect, light_count = self._light_samples(
+                *surface_values,
+                emitters,
+                occluder_points,
+                generator,
+                transport_mode,
+                training_proxy_weight,
+            )
+            sample_count = float(brdf_count + light_count)
+            direct_hdr[surface_ids] = (brdf_direct + light_direct) / sample_count
+            indirect_hdr[surface_ids] = (brdf_indirect + light_indirect) / sample_count
         hdr = (direct_hdr + indirect_hdr).reshape(shape + (3,)) + emission_hdr
         direct_hdr = direct_hdr.reshape(shape + (3,))
         indirect_hdr = indirect_hdr.reshape(shape + (3,))
@@ -133,7 +129,7 @@ class DeferredRenderer:
     ) -> tuple[Tensor, Tensor]:
         """Return self-emission for the nearest camera-visible emitter.
 
-        The Gaussian G-buffer and learned emitter ellipsoids are two competing
+        The Gaussian G-buffer and learned planar emitters are two competing
         scene layers.  An emitter contributes only when its first positive ray
         intersection is closer than the expected Gaussian surface.  Invalid
         Gaussian pixels carry an infinite surface distance, allowing an
@@ -205,7 +201,9 @@ class DeferredRenderer:
                 use_axis_gains=self.config.six_axis_emission,
             ) * hit.unsqueeze(-1)
         light_pdf = torch.where(
-            hit.unsqueeze(-1), emitters.light_pdf_surrogate(safe_dist, ids), torch.zeros_like(dist)
+            hit.unsqueeze(-1),
+            emitters.light_pdf_surrogate(safe_dist, ids, dirs),
+            torch.zeros_like(dist),
         )
         mix_pdf = self._mix_pdf(brdf_pdf, light_pdf, emitters.num_emitters).clamp_min(self.config.eps)
         direct_incident, indirect_incident = self._incident_transport(
@@ -252,7 +250,7 @@ class DeferredRenderer:
         del q
         ndotl = (normals[:, None] * dirs).sum(-1, keepdim=True).clamp_min(0.0)
         brdf_pdf = ndotl / torch.pi
-        light_pdf = emitters.light_pdf_surrogate(dist, ids)
+        light_pdf = emitters.light_pdf_surrogate(dist, ids, dirs)
         mix_pdf = self._mix_pdf(brdf_pdf, light_pdf, emitters.num_emitters).clamp_min(self.config.eps)
         direct = emitters.radiance_for_ids(
             -dirs,
@@ -389,7 +387,9 @@ class DeferredRenderer:
             ndotl = (
                 normals[:, None, :] * secondary_dirs
             ).sum(-1, keepdim=True).clamp_min(0.0)
-            light_pdf = emitters.light_pdf_surrogate(secondary_dist, emitter_ids).clamp_min(
+            light_pdf = emitters.light_pdf_surrogate(
+                secondary_dist, emitter_ids, secondary_dirs
+            ).clamp_min(
                 self.config.eps
             )
             fr = self.brdf(

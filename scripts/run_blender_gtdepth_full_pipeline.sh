@@ -10,16 +10,16 @@ PYTHON="$DNS_ENV/bin/python"
 
 SCENE="${SCENE:-blender_my_room_single_room_heightdiverse_20260901}"
 DATA="${DATA:-$WORKSPACE/datasets/aegir_nerfstudio/$SCENE}"
-GT_DATA="${GT_DATA:-$WORKSPACE/datasets/aegir_nerfstudio/${SCENE}_rgb_pose_mask_gtdepth_seed}"
+GT_DATA="${GT_DATA:-$WORKSPACE/datasets/aegir_nerfstudio/${SCENE}_rgb_pose_mask_gtdepth_seed_noemit}"
 SEED_DIR="${SEED_DIR:-$WORKSPACE/datasets/geometry_seeds/$SCENE}"
-SEED_PLY="$SEED_DIR/gt_depth_seed_stride4_voxel002.ply"
+SEED_PLY="$SEED_DIR/gt_depth_seed_stride4_voxel010_noemit_dilate2.ply"
 PRIORS="${PRIORS:-$WORKSPACE/datasets/diffusionrenderer_priors/$SCENE}"
 
-DN_OUTPUT="${DN_OUTPUT:-$AEGIR_ROOT/outputs/2dgs_gtdepth_seedpc_l1_20k_densify10k_20260901}"
-DN_LOG="${DN_LOG:-$AEGIR_ROOT/logs/2dgs_gtdepth_seedpc_l1_20k_densify10k_20260901}"
+DN_OUTPUT="${DN_OUTPUT:-$AEGIR_ROOT/outputs/2dgs_gtdepth_voxel010_noemit_l1_20k_densify10k_20260913}"
+DN_LOG="${DN_LOG:-$AEGIR_ROOT/logs/2dgs_gtdepth_voxel010_noemit_l1_20k_densify10k_20260913}"
 DN_CKPT="$DN_OUTPUT/$SCENE/nerfstudio_models/step-000020000.pt"
 HDR_DIAG="${HDR_DIAG:-$AEGIR_ROOT/outputs/hdr_emitter_preflight_20260901/$SCENE}"
-AEGIR_OUTPUT="${AEGIR_OUTPUT:-$AEGIR_ROOT/outputs/aegir_${SCENE}_gtseed_2dgs20k_frozen_origin015_bounce1_raster256_20260901/$SCENE}"
+AEGIR_OUTPUT="${AEGIR_OUTPUT:-$AEGIR_ROOT/outputs/aegir_${SCENE}_planar_emitters_noemit_2dgs20k_bounce1_20260913/$SCENE}"
 PIPELINE_LOG="$AEGIR_OUTPUT/full_pipeline.log"
 TIMING="$AEGIR_OUTPUT/full_pipeline_timing.tsv"
 
@@ -52,8 +52,8 @@ cd "$AEGIR_ROOT"
 echo "$(date --iso-8601=seconds) Blender GT-depth full pipeline START"
 echo "scene=$SCENE"
 echo "data=$DATA"
-echo "2DGS: GT Z-depth L1, lambda_depth=0.2, lambda_dist=0, densify_until=10000, grad=0.0005"
-echo "AEGIR: geometry frozen, culling off, raster=256, origin_offset=0.15m, bounce_samples=1"
+echo "2DGS: emitter-excluded GT Z-depth/RGB masks, L1 depth, lambda_depth=0.2, lambda_dist=0, densify_until=10000, grad=0.0005"
+echo "AEGIR: geometry frozen, culling off, raster=256, origin_offset=0.15m, secondary-only bounce_samples=8"
 
 echo "[1/7] Validate rendered Blender dataset"
 "$PYTHON" scripts/blender_aegir/validate_dataset.py --data "$DATA"
@@ -76,11 +76,13 @@ if [[ ! -s "$SEED_PLY" ]]; then
     --output "$SEED_PLY" \
     --split train \
     --pixel-stride 4 \
-    --voxel-size 0.02 \
+    --voxel-size 0.10 \
     --min-depth 0.1 \
     --max-depth 15 \
     --statistical-nb-neighbors 20 \
-    --statistical-std-ratio 2.0
+    --statistical-std-ratio 2.0 \
+    --exclude-emitter-masks \
+    --emitter-mask-dilation 2
 else
   echo "Reusing GT-depth seed: $SEED_PLY"
 fi
@@ -91,7 +93,9 @@ if [[ ! -s "$GT_DATA/transforms.json" ]]; then
     --source "$DATA" \
     --output "$GT_DATA" \
     --mono-depth-source "$DATA/depths" \
-    --point-cloud-source "$SEED_PLY"
+    --point-cloud-source "$SEED_PLY" \
+    --exclude-emitter-masks \
+    --emitter-mask-dilation 2
 else
   echo "Reusing prepared GT-depth view: $GT_DATA"
 fi
@@ -121,14 +125,19 @@ else
 fi
 test -s "$PRIORS/manifest.json"
 
-echo "[7/7] Train frozen-geometry AEGIR 20K, inspect 30 views, export PLY"
+echo "[7/7] Train frozen-geometry planar-emitter AEGIR 20K, inspect 30 views, export PLY"
 GEOMETRY="$DN_CKPT" \
 DATA="$DATA" \
 PRIORS="$PRIORS" \
 GEOMETRY_LR=0 \
 SCENE_CULLING=0 \
-BOUNCE_SAMPLES=1 \
+BOUNCE_SAMPLES=8 \
+BOUNCE_CHUNK_SIZE=8192 \
 RASTER_SIZE=256 \
+TRAINING_TRANSPORT_MODE=secondary_only \
+ALBEDO_INITIALIZATION=sh_dc \
+LIGHT_WHITE=0 \
+LIGHT_WHITE_RAMP_END=0 \
 OUTPUT_ROOT="$AEGIR_OUTPUT" \
 bash scripts/run_conference_frozen_origin015_bounce8_train_inspect.sh
 

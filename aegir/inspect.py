@@ -8,7 +8,7 @@ import torch
 from PIL import Image
 from torch import Tensor
 
-from .checkpoint import emitter_state_dict, load_checkpoint
+from .checkpoint import emitter_state_dict, emitters_from_state, load_checkpoint
 from .color import apply_ldr_pipeline, configure_ldr_fallback, display_srgb, hdr_log_image
 from .config import config_from_dict
 from .data import (
@@ -311,6 +311,8 @@ def inspect_checkpoint(
             "original_emitter_count": original_emitter_count,
             "active_emitter_indices": list(active_emitter_indices),
             "active_emitter_count": emitters.num_emitters,
+            "emitter_representation": emitters.representation,
+            "emission_model": "one_sided_lambertian",
             "six_axis_emission": config.render.six_axis_emission,
             "emitter_axis_lobe_sharpness": config.render.emitter_axis_lobe_sharpness,
             "render_chunk_size": 256,
@@ -358,6 +360,9 @@ def inspect_checkpoint(
     }
     initial_emitter_state = payload.get("initial_emitter_state")
     if initial_emitter_state is not None:
+        initial_emitter_state = emitter_state_dict(
+            emitters_from_state(initial_emitter_state, "cpu")
+        )
         index = torch.tensor(active_emitter_indices, dtype=torch.long)
         initial_emitter_state = {
             key: value.index_select(0, index) for key, value in initial_emitter_state.items()
@@ -406,6 +411,8 @@ def inspect_emitter_evolution(
         initial_scene.sanitize_parameters(bounds)
         initial_emitters.sanitize_parameters(bounds)
         initial_state = emitter_state_dict(initial_emitters)
+    else:
+        initial_state = emitter_state_dict(emitters_from_state(initial_state, "cpu"))
     output_dir = Path(output_dir)
     create_emitter_evolution_outputs(
         initial_state,

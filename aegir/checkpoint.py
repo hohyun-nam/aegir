@@ -12,8 +12,9 @@ import torch
 from .config import AEGIRConfig
 from .emitters import AreaEmitterModel
 from .gaussian_scene import GaussianMaterialBackend, planarize_gaussians
+from .math_utils import matrix_to_quat, quat_to_matrix
 
-CHECKPOINT_FORMAT = "aegir_shared_gaussian_v12"
+CHECKPOINT_FORMAT = "aegir_shared_gaussian_v13"
 SUPPORTED_CHECKPOINT_FORMATS = {
     "aegir_shared_gaussian_v1",
     "aegir_shared_gaussian_v2",
@@ -26,6 +27,7 @@ SUPPORTED_CHECKPOINT_FORMATS = {
     "aegir_shared_gaussian_v9",
     "aegir_shared_gaussian_v10",
     "aegir_shared_gaussian_v11",
+    "aegir_shared_gaussian_v12",
     CHECKPOINT_FORMAT,
 }
 EXACT_RESUME_FORMATS = {CHECKPOINT_FORMAT}
@@ -38,9 +40,6 @@ def emitter_state_dict(emitters: AreaEmitterModel) -> dict[str, torch.Tensor]:
         "quaternions": state.quaternions.cpu(),
         "scales": state.scales.cpu(),
         "colors": state.colors.cpu(),
-        "axis_gains": state.axis_gains.cpu(),
-        "spreads": state.spreads.cpu(),
-        "falloff_powers": state.falloff_powers.cpu(),
     }
 
 
@@ -102,8 +101,8 @@ def require_exact_resume_state(payload: dict[str, Any], path: str | Path | None 
     if payload.get("format") not in EXACT_RESUME_FORMATS or "training_state" not in payload:
         raise ValueError(
             f"checkpoint{location} has no exact-resume optimizer/RNG state; "
-            "only v12 checkpoints use active-parameter clipping and the independent SH schedule; "
-            "v1-v11 are inference-only or explicit warm starts"
+            "only v13 planar-emitter checkpoints are exactly resumable; "
+            "v1-v12 are inference-only or explicit warm starts"
         )
     training_state = payload["training_state"]
     required = {
@@ -143,22 +142,61 @@ def require_exact_resume_state(payload: dict[str, Any], path: str | Path | None 
     return training_state
 
 
-def emitters_from_state(payload: dict[str, torch.Tensor], device: str) -> AreaEmitterModel:
+def _legacy_planar_emitter_state(payload: dict[str, Any]) -> dict[str, torch.Tensor]:
+    """Collapse a legacy ellipsoid and angular lobe into one planar ellipse."""
+
+    scales = payload["scales"]
+    if scales.shape[-1] == 2:
+        return {
+            "centers": payload["centers"],
+            "quaternions": payload["quaternions"],
+            "scales": scales,
+            "colors": payload["colors"],
+        }
+    if scales.shape[-1] != 3:
+        raise ValueError(f"unsupported emitter scale shape {tuple(scales.shape)}")
+
+    rotations = quat_to_matrix(payload["quaternions"].float())
+    order = scales.argsort(dim=-1, descending=True)
+    rotations = rotations.gather(-1, order[:, None, :].expand(-1, 3, -1))
+    planar_scales = scales.gather(-1, order)[..., :2]
+    normal_axis = order[..., 2]
+
     axis_gains = payload.get("axis_gains")
-    if axis_gains is None:
-        axis_gains = torch.ones(
-            (payload["centers"].shape[0], 6),
-            dtype=payload["centers"].dtype,
-            device=payload["centers"].device,
-        )
+    front_sign = torch.ones_like(normal_axis, dtype=rotations.dtype)
+    if axis_gains is not None:
+        positive = axis_gains.gather(-1, (2 * normal_axis).unsqueeze(-1)).squeeze(-1)
+        negative = axis_gains.gather(-1, (2 * normal_axis + 1).unsqueeze(-1)).squeeze(-1)
+        front_sign = torch.where(negative > positive, -front_sign, front_sign)
+    # Flip one tangent with the normal so the basis remains right-handed.
+    rotations[..., :, 0] *= front_sign[:, None]
+    rotations[..., :, 2] *= front_sign[:, None]
+
+    colors = payload["colors"].float()
+    spreads = payload.get("spreads")
+    powers = payload.get("falloff_powers")
+    if spreads is not None and powers is not None:
+        selected_spread = spreads.gather(-1, normal_axis.unsqueeze(-1)).clamp_min(1.0e-6)
+        colors = colors * torch.exp(-(selected_spread.reciprocal().square()).pow(powers))
+    if axis_gains is not None:
+        gain_index = 2 * normal_axis + (front_sign < 0).long()
+        colors = colors * axis_gains.gather(-1, gain_index.unsqueeze(-1))
+
+    return {
+        "centers": payload["centers"],
+        "quaternions": matrix_to_quat(rotations).to(payload["quaternions"]),
+        "scales": planar_scales,
+        "colors": colors.to(payload["colors"]),
+    }
+
+
+def emitters_from_state(payload: dict[str, Any], device: str) -> AreaEmitterModel:
+    planar = _legacy_planar_emitter_state(payload)
     return AreaEmitterModel(
-        centers=payload["centers"].to(device),
-        scales=payload["scales"].to(device),
-        colors=payload["colors"].to(device),
-        axis_gains=axis_gains.to(device),
-        quaternions=payload["quaternions"].to(device),
-        spreads=payload["spreads"].to(device),
-        falloff_powers=payload["falloff_powers"].to(device),
+        centers=planar["centers"].to(device),
+        scales=planar["scales"].to(device),
+        colors=planar["colors"].to(device),
+        quaternions=planar["quaternions"].to(device),
     )
 
 
@@ -250,13 +288,7 @@ def load_checkpoint(
         device
     )
     emitters = emitters_from_state(payload["emitter_state"], device)
-    if "emitter_raw_state" in payload:
+    if payload.get("format") == CHECKPOINT_FORMAT and "emitter_raw_state" in payload:
         raw_state = dict(payload["emitter_raw_state"])
-        # v1-v8 emitters were front/back symmetric and therefore had no
-        # signed-axis parameter. Six unit gains reproduce that model exactly.
-        raw_state.setdefault(
-            "log_axis_gains",
-            emitters.log_axis_gains.detach().cpu().clone(),
-        )
         emitters.load_state_dict(raw_state, strict=True)
     return scene, emitters, payload
