@@ -48,16 +48,26 @@ done
 
 CUDA_ROOT="$DNS_ENV/lib/python3.10/site-packages/nvidia/cu13"
 CUDA_STUBS="$AEGIR_ROOT/outputs/cuda_link_stubs"
+OPTIX_DRIVER_LIB="${OPTIX_DRIVER_LIB:-$AEGIR_ROOT/outputs/nvidia_driver_580.173.02_optix/extracted}"
+for required in \
+  "$OPTIX_DRIVER_LIB/libnvoptix.so.1" \
+  "$OPTIX_DRIVER_LIB/libnvidia-rtcore.so.580.173.02"; do
+  if [[ ! -s "$required" ]]; then
+    echo "missing usable NVIDIA OptiX driver library: $required" >&2
+    exit 1
+  fi
+done
 export CUDA_HOME="$CUDA_ROOT"
 export TORCH_CUDA_ARCH_LIST=12.0
 export TORCH_EXTENSIONS_DIR="$AEGIR_ROOT/outputs/torch_extensions_cache_workspace"
 export PATH="$DNS_ENV/bin:$CUDA_ROOT/bin:$PATH"
 export LIBRARY_PATH="$CUDA_STUBS:$CUDA_ROOT/lib:$CUDA_ROOT/lib64${LIBRARY_PATH:+:$LIBRARY_PATH}"
-export LD_LIBRARY_PATH="$CUDA_STUBS:$CUDA_ROOT/lib:$CUDA_ROOT/lib64:$DNS_ENV/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="$OPTIX_DRIVER_LIB:$CUDA_STUBS:$CUDA_ROOT/lib:$CUDA_ROOT/lib64:$DNS_ENV/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 export TORCH_HOME="$WORKSPACE/.cache/torch"
 export XDG_CACHE_HOME="$WORKSPACE/.cache"
 export PYTHONPATH="$AEGIR_ROOT${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONFAULTHANDLER=1
 if [[ "$SCENE_CULLING" != "0" && "$SCENE_CULLING" != "1" ]]; then
   echo "SCENE_CULLING must be 0 or 1" >&2
   exit 1
