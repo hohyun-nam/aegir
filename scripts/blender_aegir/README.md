@@ -100,6 +100,7 @@ python "$ROOT/scripts/blender_aegir/correct_capture_intrinsics.py" \
 ```
 
 Rendered RGB/HDR/G-buffer directories are linked read-only into the corrected
-dataset. Depth arrays are corrected from the preserved ray distance. Existing
+dataset. Depth arrays are recovered by undoing the legacy ray-factor division
+that was incorrectly applied to Cycles' axial Z pass. Existing
 COLMAP, monocular-depth, and SFM-derived products are intentionally excluded;
 regenerate them using the corrected metadata before training.

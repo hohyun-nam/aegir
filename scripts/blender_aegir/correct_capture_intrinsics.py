@@ -2,8 +2,9 @@
 """Correct legacy Blender captures whose fy ignored the render aspect ratio.
 
 The source capture is never modified.  Immutable rendered products are linked
-into a new dataset, while z-depth is materialized again because the original
-ray-distance-to-z conversion used the incorrect focal length.
+into a new dataset, while z-depth is materialized again because the legacy
+capture incorrectly divided Cycles' already-axial Z pass by a ray-length
+factor computed from the old intrinsics.
 """
 
 from __future__ import annotations
@@ -61,17 +62,22 @@ def correct_z_depth(
     cx: float,
     cy: float,
 ) -> np.ndarray:
-    """Reconstruct ray distance with old K, then convert it using corrected K."""
+    """Recover Cycles camera Z-depth from a legacy divided depth array.
+
+    Cycles' Depth/Z pass is axial camera depth.  Legacy captures treated it as
+    Euclidean ray distance and stored ``cycles_z / old_ray_factor``.  Recovering
+    the physical Z-depth therefore only multiplies by the old factor.  The new
+    focal lengths affect unprojection, not the Z-depth value itself.
+    """
     if depth_z.ndim != 2:
         raise ValueError(f"expected HxW z-depth, got {depth_z.shape}")
     height, width = depth_z.shape
     xs_old = (np.arange(width, dtype=np.float64) + 0.5 - cx) / old_fx
     ys_old = (np.arange(height, dtype=np.float64) + 0.5 - cy) / old_fy
-    xs_new = (np.arange(width, dtype=np.float64) + 0.5 - cx) / new_fx
-    ys_new = (np.arange(height, dtype=np.float64) + 0.5 - cy) / new_fy
     old_factor = np.sqrt(1.0 + ys_old[:, None] ** 2 + xs_old[None, :] ** 2)
-    new_factor = np.sqrt(1.0 + ys_new[:, None] ** 2 + xs_new[None, :] ** 2)
-    result = depth_z.astype(np.float64, copy=False) * old_factor / new_factor
+    if new_fx <= 0.0 or new_fy <= 0.0:
+        raise ValueError("corrected focal lengths must be positive")
+    result = depth_z.astype(np.float64, copy=False) * old_factor
     result[~np.isfinite(depth_z) | (depth_z <= 0.0)] = 0.0
     return result.astype(np.float32)
 
@@ -87,12 +93,13 @@ def update_metadata(metadata: dict, focal_axis: str, source: Path) -> dict:
     result["fl_x"] = root_focal
     result["fl_y"] = root_focal
     result["aegir_intrinsics_correction"] = {
-        "format": "aegir-intrinsics-correction-v1",
+        "format": "aegir-intrinsics-correction-v2",
         "source_dataset": str(source),
         "method": "preserve Blender render-fit focal axis; enforce square-pixel fx=fy",
         "preserved_focal_axis": focal_axis,
-        "depth_correction": "recover ray distance with legacy K, then reconvert to z-depth with corrected K",
+        "depth_correction": "recover Cycles axial Z-depth by undoing the legacy ray-factor division",
     }
+    result["source_depth_mode"] = "cycles_axial_z_recovered_from_legacy_ray_factor_division"
     # This is generated only after fixed-pose triangulation has completed.
     result.pop("ply_file_path", None)
     return result

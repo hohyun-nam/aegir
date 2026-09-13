@@ -68,10 +68,14 @@ sample during 20K training and eight during the 30-view inspection. Inspection
 does not enable the training SH proxy.
 
 For the legacy Blender room capture, the runner defaults to the
-`*_intrinsics_fixed` dataset and rejects `fx != fy`. The original metadata used
-`fy=597.33` for a 512x512 square-pixel render whose correct focal length is
-`fx=fy=398.22`; its Z-depth is also inconsistent until corrected. Using that
-original dataset corrupts GT-depth back-projection before native 2DGS begins.
+`*_intrinsics_depthfixed_v2` dataset and rejects `fx != fy`. The original
+metadata used `fy=597.33` for a 512x512 square-pixel render whose correct focal
+length is `fx=fy=398.22`. Cycles' Depth/Z pass is already axial camera depth,
+but the legacy capture divided it by a pixel ray-length factor. The first
+intrinsics repair also treated that value as ray distance and left off-axis
+depth too short. The v2 repair only undoes the original division, then uses the
+corrected intrinsics during unprojection. In the six-panel room this reduces
+mask-initialized emitter center error from as much as 30 cm to about 2--7 cm.
 
 That runner keeps the established `0.10`-unit voxel downsampling for the GT
 depth seed so emitter masking does not reintroduce an oversized point cloud.

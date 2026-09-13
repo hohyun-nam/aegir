@@ -483,7 +483,10 @@ def main() -> None:
         )
         combined = np.nan_to_num(combined, nan=0.0, posinf=0.0, neginf=0.0)
         combined = np.clip(combined, 0.0, None).astype(np.float32)
-        ray_distance = exr_pass(
+        # Cycles' Z pass is camera-space axial depth already.  It is not the
+        # Euclidean length of the primary ray, so applying a pixel-dependent
+        # ray-length correction contracts off-axis geometry toward the camera.
+        camera_z_depth = exr_pass(
             exr, channels, ("Depth", "Z"), (("Z", "V", "R", "X"),)
         )
         normal = exr_pass(
@@ -502,12 +505,13 @@ def main() -> None:
             exr, channels, ("AEGIR_Metallic",), (("X", "V", "R"),)
         )
 
-        valid = np.isfinite(ray_distance) & (ray_distance > camera.data.clip_start) & (ray_distance < camera.data.clip_end)
+        valid = (
+            np.isfinite(camera_z_depth)
+            & (camera_z_depth > camera.data.clip_start)
+            & (camera_z_depth < camera.data.clip_end)
+        )
         fx, fy, cx, cy = intrinsics(scene, camera)
-        xs = (np.arange(args.resolution, dtype=np.float32) + 0.5 - cx) / fx
-        ys = (np.arange(args.resolution, dtype=np.float32) + 0.5 - cy) / fy
-        ray_factor = np.sqrt(1.0 + ys[:, None] ** 2 + xs[None, :] ** 2)
-        depth_z = np.where(valid, ray_distance / ray_factor, 0.0).astype(np.float32)
+        depth_z = np.where(valid, camera_z_depth, 0.0).astype(np.float32)
         normal = np.where(valid[..., None], normal, 0.0).astype(np.float32)
         albedo = np.where(valid[..., None], albedo, 0.0).astype(np.float32)
         roughness = np.where(valid, roughness, 0.0).astype(np.float32)

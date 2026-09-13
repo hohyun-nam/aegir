@@ -8,7 +8,7 @@ BASE=$(realpath "$WORKSPACE/..")
 DNS_ENV="${DNS_ENV:-$BASE/.conda/envs/dnsplatter}"
 PYTHON="$DNS_ENV/bin/python"
 
-SCENE="${SCENE:-blender_my_room_single_room_heightdiverse_20260901_intrinsics_fixed}"
+SCENE="${SCENE:-blender_my_room_single_room_heightdiverse_20260901_intrinsics_depthfixed_v2}"
 ASSET_SCENE="${ASSET_SCENE:-blender_my_room_single_room_heightdiverse_20260901}"
 DATA="${DATA:-$WORKSPACE/datasets/aegir_nerfstudio/$SCENE}"
 GT_DATA="${GT_DATA:-$WORKSPACE/datasets/aegir_nerfstudio/${SCENE}_rgb_pose_mask_gtdepth_seed_noemit}"
@@ -75,7 +75,7 @@ intrinsics = [
 if not intrinsics or any(not math.isclose(fx, fy, rel_tol=0.0, abs_tol=1.0e-6) for fx, fy in intrinsics):
     raise SystemExit(
         "this square-pixel Blender pipeline requires corrected fx=fy intrinsics; "
-        "use the *_intrinsics_fixed dataset"
+        "use the *_intrinsics_depthfixed_v2 dataset"
     )
 print(f"verified corrected square-pixel intrinsics: f={intrinsics[0][0]:.9f}")
 PY

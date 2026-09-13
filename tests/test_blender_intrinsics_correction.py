@@ -6,14 +6,14 @@ import numpy as np
 from scripts.blender_aegir.correct_capture_intrinsics import correct_dataset, correct_z_depth
 
 
-def test_correct_z_depth_round_trip_ray_distance() -> None:
-    depth = np.full((4, 4), 2.0, dtype=np.float32)
-    corrected = correct_z_depth(depth, 4.0, 6.0, 4.0, 4.0, 2.0, 2.0)
+def test_correct_z_depth_undoes_legacy_cycles_z_division() -> None:
+    cycles_z = np.full((4, 4), 2.0, dtype=np.float64)
     y = (np.arange(4, dtype=np.float64) + 0.5 - 2.0)[:, None]
     x = (np.arange(4, dtype=np.float64) + 0.5 - 2.0)[None, :]
-    old_ray_distance = depth * np.sqrt(1.0 + (x / 4.0) ** 2 + (y / 6.0) ** 2)
-    new_ray_distance = corrected * np.sqrt(1.0 + (x / 4.0) ** 2 + (y / 4.0) ** 2)
-    np.testing.assert_allclose(new_ray_distance, old_ray_distance, rtol=1e-6)
+    old_factor = np.sqrt(1.0 + (x / 4.0) ** 2 + (y / 6.0) ** 2)
+    legacy_depth = (cycles_z / old_factor).astype(np.float32)
+    corrected = correct_z_depth(legacy_depth, 4.0, 6.0, 4.0, 4.0, 2.0, 2.0)
+    np.testing.assert_allclose(corrected, cycles_z, rtol=1e-6)
 
 
 def test_correct_dataset_preserves_source_and_excludes_derived_products(tmp_path: Path) -> None:
