@@ -8,12 +8,13 @@ BASE=$(realpath "$WORKSPACE/..")
 DNS_ENV="${DNS_ENV:-$BASE/.conda/envs/dnsplatter}"
 PYTHON="$DNS_ENV/bin/python"
 
-SCENE="${SCENE:-blender_my_room_single_room_heightdiverse_20260901}"
+SCENE="${SCENE:-blender_my_room_single_room_heightdiverse_20260901_intrinsics_fixed}"
+ASSET_SCENE="${ASSET_SCENE:-blender_my_room_single_room_heightdiverse_20260901}"
 DATA="${DATA:-$WORKSPACE/datasets/aegir_nerfstudio/$SCENE}"
 GT_DATA="${GT_DATA:-$WORKSPACE/datasets/aegir_nerfstudio/${SCENE}_rgb_pose_mask_gtdepth_seed_noemit}"
 SEED_DIR="${SEED_DIR:-$WORKSPACE/datasets/geometry_seeds/$SCENE}"
 SEED_PLY="$SEED_DIR/gt_depth_seed_stride4_voxel010_noemit_dilate2.ply"
-PRIORS="${PRIORS:-$WORKSPACE/datasets/diffusionrenderer_priors/$SCENE}"
+PRIORS="${PRIORS:-$WORKSPACE/datasets/diffusionrenderer_priors/$ASSET_SCENE}"
 
 DN_OUTPUT="${DN_OUTPUT:-$AEGIR_ROOT/outputs/2dgs_gtdepth_voxel010_noemit_l1_20k_densify10k_20260913}"
 DN_LOG="${DN_LOG:-$AEGIR_ROOT/logs/2dgs_gtdepth_voxel010_noemit_l1_20k_densify10k_20260913}"
@@ -57,6 +58,27 @@ echo "AEGIR: geometry frozen, culling off, raster=256, origin_offset=0.15m, seco
 
 echo "[1/7] Validate rendered Blender dataset"
 "$PYTHON" scripts/blender_aegir/validate_dataset.py --data "$DATA"
+"$PYTHON" - "$DATA/transforms.json" <<'PY'
+import json
+import math
+import sys
+
+metadata = json.load(open(sys.argv[1], encoding="utf-8"))
+frames = metadata.get("frames", [])
+intrinsics = [
+    (
+        float(frame.get("fl_x", metadata["fl_x"])),
+        float(frame.get("fl_y", metadata["fl_y"])),
+    )
+    for frame in frames
+]
+if not intrinsics or any(not math.isclose(fx, fy, rel_tol=0.0, abs_tol=1.0e-6) for fx, fy in intrinsics):
+    raise SystemExit(
+        "this square-pixel Blender pipeline requires corrected fx=fy intrinsics; "
+        "use the *_intrinsics_fixed dataset"
+    )
+print(f"verified corrected square-pixel intrinsics: f={intrinsics[0][0]:.9f}")
+PY
 
 echo "[2/7] HDR emitter diagnostics"
 if [[ ! -s "$HDR_DIAG/summary.json" ]]; then

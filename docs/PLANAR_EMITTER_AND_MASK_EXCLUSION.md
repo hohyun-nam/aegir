@@ -67,6 +67,12 @@ Its AEGIR stage uses explicit secondary transport throughout: one secondary
 sample during 20K training and eight during the 30-view inspection. Inspection
 does not enable the training SH proxy.
 
+For the legacy Blender room capture, the runner defaults to the
+`*_intrinsics_fixed` dataset and rejects `fx != fy`. The original metadata used
+`fy=597.33` for a 512x512 square-pixel render whose correct focal length is
+`fx=fy=398.22`; its Z-depth is also inconsistent until corrected. Using that
+original dataset corrupts GT-depth back-projection before native 2DGS begins.
+
 That runner keeps the established `0.10`-unit voxel downsampling for the GT
 depth seed so emitter masking does not reintroduce an oversized point cloud.
 
