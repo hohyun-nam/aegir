@@ -32,6 +32,22 @@ FRAME_SUPERVISION_KEYS = {
     "emitter_mask_path",
 }
 
+EMITTER_EXEMPT_VALUE = 64
+
+
+def encode_training_mask(
+    valid: np.ndarray,
+    emitter: np.ndarray,
+    *,
+    encode_emitter_exemption: bool,
+) -> np.ndarray:
+    """Encode valid, invalid, and loss-exempt emitter pixels in one PNG mask."""
+    encoded = np.zeros(valid.shape, dtype=np.uint8)
+    encoded[valid & ~emitter] = 255
+    if encode_emitter_exemption:
+        encoded[valid & emitter] = EMITTER_EXEMPT_VALUE
+    return encoded
+
 
 def resolve(root: Path, value: str | Path) -> Path:
     path = Path(value)
@@ -77,6 +93,14 @@ def main() -> None:
         help="Emitter exclusion margin in source-image pixels (default: 2).",
     )
     parser.add_argument(
+        "--encode-emitter-exemption",
+        action="store_true",
+        help=(
+            "Encode valid emitter pixels as gray (64): excluded from RGB/depth "
+            "supervision but exempt from invalid-opacity removal."
+        ),
+    )
+    parser.add_argument(
         "--point-cloud-source",
         type=Path,
         default=None,
@@ -90,6 +114,10 @@ def main() -> None:
         raise ValueError("--source and --output must be different")
     if args.emitter_mask_dilation < 0:
         raise ValueError("--emitter-mask-dilation must be non-negative")
+    if args.encode_emitter_exemption and not args.exclude_emitter_masks:
+        raise ValueError(
+            "--encode-emitter-exemption requires --exclude-emitter-masks"
+        )
     transforms_path = source / "transforms.json"
     if not transforms_path.is_file():
         raise FileNotFoundError(transforms_path)
@@ -191,14 +219,21 @@ def main() -> None:
             emitter = emitter > 0
             if args.emitter_mask_dilation > 0:
                 emitter = cv2.dilate(emitter.astype(np.uint8), kernel, iterations=1).astype(bool)
-            combined = valid & ~emitter
             excluded_pixels += int((valid & emitter).sum())
             mask_name = f"{index:06d}_{Path(frame['file_path']).stem}.png"
-            Image.fromarray((combined.astype(np.uint8) * 255), mode="L").save(
-                masks_output / mask_name
+            encoded_mask = encode_training_mask(
+                valid,
+                emitter,
+                encode_emitter_exemption=args.encode_emitter_exemption,
             )
+            Image.fromarray(encoded_mask, mode="L").save(masks_output / mask_name)
             frame["mask_path"] = f"masks/{mask_name}"
         print(f"emitter-excluded valid pixels: {excluded_pixels}")
+        if args.encode_emitter_exemption:
+            print(
+                "mask classes: invalid=0, emitter-exempt=64, "
+                "valid-supervision=255"
+            )
     else:
         ensure_relative_symlink(source / "masks", output, "masks")
     if point_cloud_source is None:

@@ -11,16 +11,17 @@ PYTHON="$DNS_ENV/bin/python"
 SCENE="${SCENE:-blender_my_room_single_room_heightdiverse_20260901_intrinsics_depthfixed_v2}"
 ASSET_SCENE="${ASSET_SCENE:-blender_my_room_single_room_heightdiverse_20260901}"
 DATA="${DATA:-$WORKSPACE/datasets/aegir_nerfstudio/$SCENE}"
-GT_DATA="${GT_DATA:-$WORKSPACE/datasets/aegir_nerfstudio/${SCENE}_rgb_pose_mask_gtdepth_seed_noemit}"
+GT_DATA="${GT_DATA:-$WORKSPACE/datasets/aegir_nerfstudio/${SCENE}_rgb_pose_mask_gtdepth_seed_noemit_classmask}"
 SEED_DIR="${SEED_DIR:-$WORKSPACE/datasets/geometry_seeds/$SCENE}"
 SEED_PLY="$SEED_DIR/gt_depth_seed_stride4_voxel010_noemit_dilate2.ply"
 PRIORS="${PRIORS:-$WORKSPACE/datasets/diffusionrenderer_priors/$ASSET_SCENE}"
 
-DN_OUTPUT="${DN_OUTPUT:-$AEGIR_ROOT/outputs/2dgs_gtdepth_voxel010_noemit_l1_20k_densify10k_20260913}"
-DN_LOG="${DN_LOG:-$AEGIR_ROOT/logs/2dgs_gtdepth_voxel010_noemit_l1_20k_densify10k_20260913}"
+DN_OUTPUT="${DN_OUTPUT:-$AEGIR_ROOT/outputs/2dgs_gtdepth_voxel010_noemit_classmask_invalid005_l1_20k_densify10k_20260914}"
+DN_LOG="${DN_LOG:-$AEGIR_ROOT/logs/2dgs_gtdepth_voxel010_noemit_classmask_invalid005_l1_20k_densify10k_20260914}"
 DN_CKPT="$DN_OUTPUT/$SCENE/nerfstudio_models/step-000020000.pt"
 HDR_DIAG="${HDR_DIAG:-$AEGIR_ROOT/outputs/hdr_emitter_preflight_20260901/$SCENE}"
-AEGIR_OUTPUT="${AEGIR_OUTPUT:-$AEGIR_ROOT/outputs/aegir_${SCENE}_planar_directional_emitters_noemit_2dgs20k_bounce1_20260914/$SCENE}"
+AEGIR_OUTPUT="${AEGIR_OUTPUT:-$AEGIR_ROOT/outputs/aegir_${SCENE}_planar_directional_noemit_classmask_invalid005_2dgs20k_bounce1_20260914/$SCENE}"
+INVALID_OPACITY_WEIGHT="${INVALID_OPACITY_WEIGHT:-0.05}"
 PIPELINE_LOG="$AEGIR_OUTPUT/full_pipeline.log"
 TIMING="$AEGIR_OUTPUT/full_pipeline_timing.tsv"
 
@@ -53,7 +54,7 @@ cd "$AEGIR_ROOT"
 echo "$(date --iso-8601=seconds) Blender GT-depth full pipeline START"
 echo "scene=$SCENE"
 echo "data=$DATA"
-echo "2DGS: emitter-excluded GT Z-depth/RGB masks, L1 depth, lambda_depth=0.2, lambda_dist=0, densify_until=10000, grad=0.0005"
+echo "2DGS: class-aware emitter-excluded GT Z-depth/RGB masks, L1 depth, lambda_depth=0.2, true-invalid-opacity=$INVALID_OPACITY_WEIGHT with 5px surface protection, lambda_dist=0, densify_until=10000, grad=0.0005"
 echo "AEGIR: directional planar emitters, geometry frozen, culling off, raster=256, origin_offset=0.15m, secondary-only train_bounce_samples=1 inspect_bounce_samples=8"
 
 echo "[1/7] Validate rendered Blender dataset"
@@ -117,16 +118,44 @@ if [[ ! -s "$GT_DATA/transforms.json" ]]; then
     --mono-depth-source "$DATA/depths" \
     --point-cloud-source "$SEED_PLY" \
     --exclude-emitter-masks \
+    --encode-emitter-exemption \
     --emitter-mask-dilation 2
 else
   echo "Reusing prepared GT-depth view: $GT_DATA"
 fi
+"$PYTHON" - "$GT_DATA/transforms.json" "$INVALID_OPACITY_WEIGHT" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+from PIL import Image
+
+transforms_path = Path(sys.argv[1])
+weight = float(sys.argv[2])
+metadata = json.loads(transforms_path.read_text(encoding="utf-8"))
+root = transforms_path.parent
+classes = set()
+for frame in metadata["frames"]:
+    classes.update(
+        np.unique(np.asarray(Image.open(root / frame["mask_path"]).convert("L"))).tolist()
+    )
+if not classes.issubset({0, 64, 255}):
+    raise SystemExit(f"unexpected prepared-mask classes: {sorted(classes)}")
+if weight > 0.0 and 64 not in classes:
+    raise SystemExit(
+        "positive invalid-opacity weight requires the class-aware emitter mask; "
+        "rebuild GT_DATA with --encode-emitter-exemption"
+    )
+print(f"verified prepared-mask classes: {sorted(classes)}")
+PY
 
 echo "[5/7] Train native 2DGS 20K with metric GT-depth L1"
 ITERATIONS=20000 \
 DATA_PATH="$GT_DATA" \
 DEPTH_LOSS_TYPE=l1 \
 LAMBDA_DEPTH=0.2 \
+LAMBDA_INVALID_OPACITY="$INVALID_OPACITY_WEIGHT" \
 LAMBDA_DIST=0 \
 DENSIFY_UNTIL_ITER=10000 \
 DENSIFY_GRAD_THRESHOLD=0.0005 \

@@ -1222,6 +1222,48 @@ def test_renderer_has_no_ambient_transport_or_outputs() -> None:
     )
 
 
+def test_renderer_masks_invalid_gaussians_and_composites_surface_alpha(monkeypatch) -> None:
+    renderer = DeferredRenderer(
+        RenderConfig(
+            num_brdf_samples=1,
+            num_light_samples=1,
+            point_visibility=False,
+            indirect_bounce=False,
+        )
+    )
+    emitters = AreaEmitterModel(
+        torch.tensor([[0.0, 0.0, 2.0]]),
+        torch.full((1, 2), 0.5),
+    )
+    gbuffer = {
+        "points": torch.zeros((2, 3)),
+        "normals": torch.tensor([[0.0, 0.0, 1.0]]).expand(2, -1),
+        "view_dirs": torch.tensor([[0.0, 0.0, 1.0]]).expand(2, -1),
+        "albedo": torch.full((2, 3), 0.5),
+        "roughness": torch.full((2, 1), 0.5),
+        "metallic": torch.zeros((2, 1)),
+        "valid_mask": torch.tensor([[True], [False]]),
+        "alpha": torch.tensor([[0.25], [0.75]]),
+    }
+
+    def brdf_samples(points, *args, **kwargs):
+        assert points.shape == (1, 3)
+        return torch.ones((1, 3)), torch.full((1, 3), 2.0), 1
+
+    def light_samples(points, *args, **kwargs):
+        assert points.shape == (1, 3)
+        return torch.full((1, 3), 3.0), torch.full((1, 3), 4.0), 1
+
+    monkeypatch.setattr(renderer, "_brdf_samples", brdf_samples)
+    monkeypatch.setattr(renderer, "_light_samples", light_samples)
+
+    rendered = renderer.render(gbuffer, emitters, tonemap=False)
+
+    assert torch.allclose(rendered["direct_hdr"][0], torch.full((3,), 0.5))
+    assert torch.allclose(rendered["indirect_hdr"][0], torch.full((3,), 0.75))
+    assert torch.count_nonzero(rendered["hdr"][1]) == 0
+
+
 def _camera_emission_gbuffer(surface_distance: float) -> dict[str, torch.Tensor]:
     return {
         "points": torch.tensor([[0.0, 0.0, surface_distance]]),

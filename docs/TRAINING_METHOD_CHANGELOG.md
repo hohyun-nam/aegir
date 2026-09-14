@@ -107,6 +107,47 @@ The Conference wrapper exposes these settings as `ALBEDO_LR`,
 
 ## Chronological changes
 
+### 2026-09-14 — Invalid-mask opacity supervision for native 2DGS
+
+- The first binary-mask implementation incorrectly grouped analytic-emitter
+  exclusion pixels with true invalid-depth pixels. Its 0.1 opacity penalty
+  erased ceiling coverage and thin window blinds; that run is a rejected
+  ablation and must not be used as the default geometry.
+- Prepared Blender masks now preserve three classes: 255 for normal surface
+  supervision, 64 for valid emitter pixels excluded from surface supervision,
+  and 0 for true invalid-depth space. RGB, depth, normal, and distortion losses
+  still use only the 255 class. Invalid-opacity loss uses only the 0 class, so
+  it never asks the 2DGS to open a hole under an analytic emitter.
+- A five-pixel protected band around valid surfaces and exempt emitters allows
+  finite Gaussian footprints to represent thin structures such as blinds
+  without being punished for slightly overlapping an invalid pane. The Blender
+  full course uses a conservative `INVALID_OPACITY_WEIGHT=0.05`.
+- `LAMBDA_INVALID_OPACITY=0` preserves earlier pipelines. Class-aware training
+  uses a fresh `_noemit_classmask` prepared-data path so an old binary mask is
+  not silently reused.
+- This requires a fresh native-2DGS run and therefore a fresh downstream AEGIR
+  run. Existing geometry checkpoints cannot acquire the missing empty-space
+  constraint during frozen-geometry AEGIR training.
+
+### 2026-09-14 — Valid-surface masking and Gaussian alpha compositing
+
+- Restricted deferred BRDF and transport evaluation to pixels where the
+  rasterized Gaussian G-buffer is valid. Empty geometry pixels can no longer
+  inherit normalized material/normal tails and appear as opaque wall-colored
+  surfaces.
+- Composited shaded Gaussian radiance with its rasterized alpha over the black
+  background. Analytic camera-visible emitter emission still replaces a
+  Gaussian surface when the ellipse is the nearest hit.
+- This is an inference/training renderer correction and does not require
+  retraining an existing checkpoint.
+- The Blender albedo comparison additionally blacks out the dataset's invalid
+  GT-depth mask. Black pixels there do not prove that the rasterized G-buffer
+  has zero alpha or a learned black material. The current directional-planar
+  checkpoint has substantial Gaussian coverage in parts of the window mask,
+  so alpha compositing attenuates but cannot remove all window fill. Removing
+  that high-alpha coverage requires explicit invalid-depth opacity supervision
+  and a new native-2DGS geometry training run.
+
 ### 2026-09-14 — Learned directional emission on planar ellipse support
 
 - Kept one bounded 2D ellipse per physical panel and restored the previous

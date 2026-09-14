@@ -72,8 +72,13 @@ class DeferredRenderer:
             occluder_points = occluder_points.reshape(-1, occluder_points.shape[-1])
 
         emission_hdr, emitter_mask = self._camera_visible_emission(gbuffer, emitters)
+        gaussian_valid = gbuffer.get("valid_mask")
+        if gaussian_valid is None:
+            gaussian_valid_flat = torch.ones_like(emitter_mask.reshape(-1), dtype=torch.bool)
+        else:
+            gaussian_valid_flat = gaussian_valid.reshape(-1).bool()
         surface_ids = torch.nonzero(
-            emitter_mask.reshape(-1) < 0.5, as_tuple=False
+            gaussian_valid_flat & (emitter_mask.reshape(-1) < 0.5), as_tuple=False
         ).flatten()
         direct_hdr = torch.zeros_like(albedo)
         indirect_hdr = torch.zeros_like(albedo)
@@ -99,8 +104,16 @@ class DeferredRenderer:
                 training_proxy_weight,
             )
             sample_count = float(brdf_count + light_count)
-            direct_hdr[surface_ids] = (brdf_direct + light_direct) / sample_count
-            indirect_hdr[surface_ids] = (brdf_indirect + light_indirect) / sample_count
+            surface_direct = (brdf_direct + light_direct) / sample_count
+            surface_indirect = (brdf_indirect + light_indirect) / sample_count
+            gaussian_alpha = gbuffer.get("alpha")
+            if gaussian_alpha is not None:
+                surface_alpha = gaussian_alpha.reshape(-1, 1).index_select(0, surface_ids)
+                surface_alpha = surface_alpha.to(direct_hdr).clamp(0.0, 1.0)
+                surface_direct = surface_direct * surface_alpha
+                surface_indirect = surface_indirect * surface_alpha
+            direct_hdr[surface_ids] = surface_direct
+            indirect_hdr[surface_ids] = surface_indirect
         hdr = (direct_hdr + indirect_hdr).reshape(shape + (3,)) + emission_hdr
         direct_hdr = direct_hdr.reshape(shape + (3,))
         indirect_hdr = indirect_hdr.reshape(shape + (3,))

@@ -12,6 +12,7 @@ DATA_ROOT="$WORKSPACE/datasets/aegir_nerfstudio"
 ITERATIONS="${ITERATIONS:-10000}"
 LAMBDA_DIST="${LAMBDA_DIST:-0.0}"
 LAMBDA_DEPTH="${LAMBDA_DEPTH:-0.2}"
+LAMBDA_INVALID_OPACITY="${LAMBDA_INVALID_OPACITY:-0.0}"
 DEPTH_LOSS_TYPE="${DEPTH_LOSS_TYPE:-pearson}"
 DATA_PATH="${DATA_PATH:-}"
 DENSIFY_UNTIL_ITER="${DENSIFY_UNTIL_ITER:-15000}"
@@ -36,8 +37,10 @@ fi
 
 "$PYTHON" "$AEGIR_ROOT/scripts/patch_2dgs_emitter_exclusion.py" \
   --two-dgs-root "$TWO_DGS_ROOT"
-if ! grep -q 'AEGIR_EMITTER_EXCLUSION_MASK' "$TWO_DGS_ROOT/train.py"; then
-  echo "native 2DGS emitter-exclusion patch verification failed" >&2
+if ! grep -q 'AEGIR_EMITTER_EXCLUSION_MASK' "$TWO_DGS_ROOT/train.py" \
+  || ! grep -q 'AEGIR_INVALID_OPACITY_LOSS' "$TWO_DGS_ROOT/train.py" \
+  || ! grep -q 'AEGIR_INVALID_OPACITY_CLASS_MASK' "$TWO_DGS_ROOT/train.py"; then
+  echo "native 2DGS mask/invalid-opacity patch verification failed" >&2
   exit 1
 fi
 
@@ -81,7 +84,7 @@ for scene in "${SCENES[@]}"; do
     continue
   fi
 
-  status "$scene" train "native 2DGS + $DEPTH_LOSS_TYPE depth, $ITERATIONS iterations, lambda_depth=$LAMBDA_DEPTH, lambda_dist=$LAMBDA_DIST, densify_until=$DENSIFY_UNTIL_ITER, densify_grad_threshold=$DENSIFY_GRAD_THRESHOLD, data=$data"
+  status "$scene" train "native 2DGS + $DEPTH_LOSS_TYPE depth, $ITERATIONS iterations, lambda_depth=$LAMBDA_DEPTH, lambda_invalid_opacity=$LAMBDA_INVALID_OPACITY, lambda_dist=$LAMBDA_DIST, densify_until=$DENSIFY_UNTIL_ITER, densify_grad_threshold=$DENSIFY_GRAD_THRESHOLD, data=$data"
   (
     cd "$TWO_DGS_ROOT"
     "$PYTHON" train.py \
@@ -95,6 +98,7 @@ for scene in "${SCENES[@]}"; do
       --depth_supervision \
       --depth_loss_type "$DEPTH_LOSS_TYPE" \
       --lambda_depth "$LAMBDA_DEPTH" \
+      --lambda_invalid_opacity "$LAMBDA_INVALID_OPACITY" \
       --lambda_dist "$LAMBDA_DIST" \
       --densify_until_iter "$DENSIFY_UNTIL_ITER" \
       --densify_grad_threshold "$DENSIFY_GRAD_THRESHOLD" \

@@ -7,6 +7,8 @@ import argparse
 from pathlib import Path
 
 MARKER = "AEGIR_EMITTER_EXCLUSION_MASK"
+OPACITY_MARKER = "AEGIR_INVALID_OPACITY_LOSS"
+CLASS_MASK_MARKER = "AEGIR_INVALID_OPACITY_CLASS_MASK"
 
 
 def replace_once(text: str, old: str, new: str) -> str:
@@ -14,6 +16,115 @@ def replace_once(text: str, old: str, new: str) -> str:
     if count != 1:
         raise RuntimeError(f"expected one native 2DGS anchor, found {count}: {old[:72]!r}")
     return text.replace(old, new, 1)
+
+
+def add_invalid_opacity_loss(text: str) -> str:
+    if OPACITY_MARKER in text:
+        return text
+    text = replace_once(
+        text,
+        """    depth_loss_type,
+    normal_supervision,
+):
+""",
+        """    depth_loss_type,
+    normal_supervision,
+    lambda_invalid_opacity,
+):
+""",
+    )
+    text = replace_once(
+        text,
+        """        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_loss)
+
+        # regularization
+""",
+        """        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_loss)
+
+        # AEGIR_INVALID_OPACITY_LOSS: the supervision mask previously removed
+        # invalid pixels from every loss but did not discourage Gaussian
+        # footprints from covering them. Penalize accumulated opacity one pixel
+        # inside the invalid region so valid silhouettes keep an antialiased edge.
+        valid_dilated = torch.nn.functional.max_pool2d(
+            supervision_mask.unsqueeze(0), kernel_size=3, stride=1, padding=1
+        ).squeeze(0)
+        invalid_core = valid_dilated < 0.5
+        rend_alpha = render_pkg["rend_alpha"]
+        if int(invalid_core.sum()) == 0:
+            invalid_opacity_loss = rend_alpha.sum() * 0.0
+        else:
+            invalid_opacity_loss = (
+                float(lambda_invalid_opacity) * rend_alpha[invalid_core].mean()
+            )
+
+        # regularization
+""",
+    )
+    text = replace_once(
+        text,
+        "total_loss = loss + dist_loss + normal_loss + normal_l1 + Ldepth",
+        "total_loss = loss + dist_loss + normal_loss + normal_l1 + Ldepth + invalid_opacity_loss",
+    )
+    text = replace_once(
+        text,
+        """    parser.add_argument("--normal_supervision", action="store_true", default=None)
+    args = parser.parse_args(sys.argv[1:])
+""",
+        """    parser.add_argument("--normal_supervision", action="store_true", default=None)
+    parser.add_argument(
+        "--lambda_invalid_opacity",
+        type=float,
+        default=0.0,
+        help="Penalize rendered alpha in class-aware, protected invalid space.",
+    )
+    args = parser.parse_args(sys.argv[1:])
+    if args.lambda_invalid_opacity < 0.0:
+        parser.error("--lambda_invalid_opacity must be non-negative")
+""",
+    )
+    text = replace_once(
+        text,
+        """        args.depth_loss_type,
+        args.normal_supervision,
+    )
+""",
+        """        args.depth_loss_type,
+        args.normal_supervision,
+        args.lambda_invalid_opacity,
+    )
+""",
+    )
+    return text
+
+
+def upgrade_invalid_opacity_class_mask(text: str) -> str:
+    if CLASS_MASK_MARKER in text:
+        return text
+    return replace_once(
+        text,
+        """        # AEGIR_INVALID_OPACITY_LOSS: the supervision mask previously removed
+        # invalid pixels from every loss but did not discourage Gaussian
+        # footprints from covering them. Penalize accumulated opacity one pixel
+        # inside the invalid region so valid silhouettes keep an antialiased edge.
+        valid_dilated = torch.nn.functional.max_pool2d(
+            supervision_mask.unsqueeze(0), kernel_size=3, stride=1, padding=1
+        ).squeeze(0)
+        invalid_core = valid_dilated < 0.5
+""",
+        """        # AEGIR_INVALID_OPACITY_LOSS: discourage Gaussian coverage only
+        # in true invalid-depth space. A prepared mask value of 64 identifies
+        # emitter pixels that are excluded from surface supervision but must not
+        # be treated as empty. Protect a five-pixel band around both supervised
+        # surfaces and exempt emitters so thin structures such as blinds retain
+        # enough room for their finite Gaussian footprints.
+        # AEGIR_INVALID_OPACITY_CLASS_MASK
+        exempt_or_valid = (confidence_map >= 0.125).to(image.dtype)
+        protected = torch.nn.functional.max_pool2d(
+            exempt_or_valid.unsqueeze(0), kernel_size=11, stride=1, padding=5
+        ).squeeze(0)
+        invalid_core = (confidence_map < 0.125) & (protected < 0.5)
+""",
+    )
 
 
 def main() -> None:
@@ -25,7 +136,15 @@ def main() -> None:
     train_path = args.two_dgs_root.resolve() / "train.py"
     text = train_path.read_text(encoding="utf-8")
     if MARKER in text:
-        print(f"emitter exclusion already installed: {train_path}")
+        updated = upgrade_invalid_opacity_class_mask(add_invalid_opacity_loss(text))
+        if updated == text:
+            print(
+                "emitter exclusion and class-aware invalid-opacity loss already "
+                f"installed: {train_path}"
+            )
+        else:
+            train_path.write_text(updated, encoding="utf-8")
+            print(f"installed class-aware invalid-opacity loss upgrade: {train_path}")
         return
 
     text = replace_once(
@@ -100,8 +219,9 @@ def main() -> None:
         "normal_confidence = (normal_confidence > 0).squeeze(0)",
         "normal_confidence = (normal_confidence > 0).squeeze(0) & (supervision_mask[0] > 0.5)",
     )
+    text = upgrade_invalid_opacity_class_mask(add_invalid_opacity_loss(text))
     train_path.write_text(text, encoding="utf-8")
-    print(f"installed emitter exclusion: {train_path}")
+    print(f"installed emitter exclusion and class-aware invalid-opacity loss: {train_path}")
 
 
 if __name__ == "__main__":
