@@ -121,7 +121,9 @@ The Conference wrapper exposes these settings as `ALBEDO_LR`,
 - A five-pixel protected band around valid surfaces and exempt emitters allows
   finite Gaussian footprints to represent thin structures such as blinds
   without being punished for slightly overlapping an invalid pane. The Blender
-  full course uses a conservative `INVALID_OPACITY_WEIGHT=0.05`.
+  full course uses a conservative `INVALID_OPACITY_WEIGHT=0.05`. The protection
+  width is configurable through `INVALID_OPACITY_PROTECTION_RADIUS` (default 5)
+  so 7-pixel thin-structure ablations do not require editing the trainer.
 - `LAMBDA_INVALID_OPACITY=0` preserves earlier pipelines. Class-aware training
   uses a fresh `_noemit_classmask` prepared-data path so an old binary mask is
   not silently reused.

@@ -9,6 +9,7 @@ from pathlib import Path
 MARKER = "AEGIR_EMITTER_EXCLUSION_MASK"
 OPACITY_MARKER = "AEGIR_INVALID_OPACITY_LOSS"
 CLASS_MASK_MARKER = "AEGIR_INVALID_OPACITY_CLASS_MASK"
+PROTECTION_RADIUS_MARKER = "AEGIR_INVALID_OPACITY_PROTECTION_RADIUS"
 
 
 def replace_once(text: str, old: str, new: str) -> str:
@@ -127,6 +128,83 @@ def upgrade_invalid_opacity_class_mask(text: str) -> str:
     )
 
 
+def add_invalid_opacity_protection_radius(text: str) -> str:
+    text = text.replace(
+        'help="Penalize rendered alpha in the one-pixel-eroded invalid supervision mask.",',
+        'help="Penalize rendered alpha in class-aware, protected invalid space.",',
+    )
+    if PROTECTION_RADIUS_MARKER in text:
+        return text
+    text = replace_once(
+        text,
+        """    lambda_invalid_opacity,
+):
+""",
+        """    lambda_invalid_opacity,
+    invalid_opacity_protection_radius,
+):
+""",
+    )
+    text = replace_once(
+        text,
+        """        # AEGIR_INVALID_OPACITY_CLASS_MASK
+        exempt_or_valid = (confidence_map >= 0.125).to(image.dtype)
+        protected = torch.nn.functional.max_pool2d(
+            exempt_or_valid.unsqueeze(0), kernel_size=11, stride=1, padding=5
+        ).squeeze(0)
+        invalid_core = (confidence_map < 0.125) & (protected < 0.5)
+""",
+        """        # AEGIR_INVALID_OPACITY_CLASS_MASK
+        # AEGIR_INVALID_OPACITY_PROTECTION_RADIUS
+        exempt_or_valid = (confidence_map >= 0.125).to(image.dtype)
+        protection_radius = int(invalid_opacity_protection_radius)
+        if protection_radius > 0:
+            protection_kernel = 2 * protection_radius + 1
+            protected = torch.nn.functional.max_pool2d(
+                exempt_or_valid.unsqueeze(0),
+                kernel_size=protection_kernel,
+                stride=1,
+                padding=protection_radius,
+            ).squeeze(0)
+        else:
+            protected = exempt_or_valid
+        invalid_core = (confidence_map < 0.125) & (protected < 0.5)
+""",
+    )
+    text = replace_once(
+        text,
+        """    args = parser.parse_args(sys.argv[1:])
+    if args.lambda_invalid_opacity < 0.0:
+        parser.error("--lambda_invalid_opacity must be non-negative")
+""",
+        """    parser.add_argument(
+        "--invalid_opacity_protection_radius",
+        type=int,
+        default=5,
+        help="Do not penalize invalid alpha within this many pixels of valid/exempt pixels.",
+    )
+    args = parser.parse_args(sys.argv[1:])
+    if args.lambda_invalid_opacity < 0.0:
+        parser.error("--lambda_invalid_opacity must be non-negative")
+    if args.invalid_opacity_protection_radius < 0:
+        parser.error("--invalid_opacity_protection_radius must be non-negative")
+""",
+    )
+    text = replace_once(
+        text,
+        """        args.normal_supervision,
+        args.lambda_invalid_opacity,
+    )
+""",
+        """        args.normal_supervision,
+        args.lambda_invalid_opacity,
+        args.invalid_opacity_protection_radius,
+    )
+""",
+    )
+    return text
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Patch native 2DGS so mask_path excludes emitter pixels from every loss."
@@ -136,10 +214,12 @@ def main() -> None:
     train_path = args.two_dgs_root.resolve() / "train.py"
     text = train_path.read_text(encoding="utf-8")
     if MARKER in text:
-        updated = upgrade_invalid_opacity_class_mask(add_invalid_opacity_loss(text))
+        updated = add_invalid_opacity_protection_radius(
+            upgrade_invalid_opacity_class_mask(add_invalid_opacity_loss(text))
+        )
         if updated == text:
             print(
-                "emitter exclusion and class-aware invalid-opacity loss already "
+                "emitter exclusion and configurable class-aware invalid-opacity loss already "
                 f"installed: {train_path}"
             )
         else:
@@ -219,7 +299,9 @@ def main() -> None:
         "normal_confidence = (normal_confidence > 0).squeeze(0)",
         "normal_confidence = (normal_confidence > 0).squeeze(0) & (supervision_mask[0] > 0.5)",
     )
-    text = upgrade_invalid_opacity_class_mask(add_invalid_opacity_loss(text))
+    text = add_invalid_opacity_protection_radius(
+        upgrade_invalid_opacity_class_mask(add_invalid_opacity_loss(text))
+    )
     train_path.write_text(text, encoding="utf-8")
     print(f"installed emitter exclusion and class-aware invalid-opacity loss: {train_path}")
 

@@ -22,6 +22,7 @@ DN_CKPT="$DN_OUTPUT/$SCENE/nerfstudio_models/step-000020000.pt"
 HDR_DIAG="${HDR_DIAG:-$AEGIR_ROOT/outputs/hdr_emitter_preflight_20260901/$SCENE}"
 AEGIR_OUTPUT="${AEGIR_OUTPUT:-$AEGIR_ROOT/outputs/aegir_${SCENE}_planar_directional_noemit_classmask_invalid005_2dgs20k_bounce1_20260914/$SCENE}"
 INVALID_OPACITY_WEIGHT="${INVALID_OPACITY_WEIGHT:-0.05}"
+INVALID_OPACITY_PROTECTION_RADIUS="${INVALID_OPACITY_PROTECTION_RADIUS:-5}"
 PIPELINE_LOG="$AEGIR_OUTPUT/full_pipeline.log"
 TIMING="$AEGIR_OUTPUT/full_pipeline_timing.tsv"
 
@@ -54,7 +55,7 @@ cd "$AEGIR_ROOT"
 echo "$(date --iso-8601=seconds) Blender GT-depth full pipeline START"
 echo "scene=$SCENE"
 echo "data=$DATA"
-echo "2DGS: class-aware emitter-excluded GT Z-depth/RGB masks, L1 depth, lambda_depth=0.2, true-invalid-opacity=$INVALID_OPACITY_WEIGHT with 5px surface protection, lambda_dist=0, densify_until=10000, grad=0.0005"
+echo "2DGS: class-aware emitter-excluded GT Z-depth/RGB masks, L1 depth, lambda_depth=0.2, true-invalid-opacity=$INVALID_OPACITY_WEIGHT with ${INVALID_OPACITY_PROTECTION_RADIUS}px surface protection, lambda_dist=0, densify_until=10000, grad=0.0005"
 echo "AEGIR: directional planar emitters, geometry frozen, culling off, raster=256, origin_offset=0.15m, secondary-only train_bounce_samples=1 inspect_bounce_samples=8"
 
 echo "[1/7] Validate rendered Blender dataset"
@@ -156,6 +157,7 @@ DATA_PATH="$GT_DATA" \
 DEPTH_LOSS_TYPE=l1 \
 LAMBDA_DEPTH=0.2 \
 LAMBDA_INVALID_OPACITY="$INVALID_OPACITY_WEIGHT" \
+INVALID_OPACITY_PROTECTION_RADIUS="$INVALID_OPACITY_PROTECTION_RADIUS" \
 LAMBDA_DIST=0 \
 DENSIFY_UNTIL_ITER=10000 \
 DENSIFY_GRAD_THRESHOLD=0.0005 \
