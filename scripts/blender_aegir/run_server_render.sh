@@ -5,6 +5,11 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 AEGIR_ROOT=$(realpath "$SCRIPT_DIR/../..")
 WORKSPACE=$(realpath "$AEGIR_ROOT/..")
 BLENDER="${BLENDER:-$WORKSPACE/tools/blender/blender}"
+PINNED_OPTIX_DRIVER="${PINNED_OPTIX_DRIVER:-$AEGIR_ROOT/outputs/blender_optix_driver_580.173.02}"
+
+if [[ -s "$PINNED_OPTIX_DRIVER/libnvoptix.so.1" ]]; then
+  export LD_LIBRARY_PATH="$PINNED_OPTIX_DRIVER${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 
 if (( $# < 3 )); then
   echo "usage: $0 SCENE.blend LIGHTING.json OUTPUT_DIR [condition] [samples] [resolution]" >&2

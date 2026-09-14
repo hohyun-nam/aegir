@@ -197,6 +197,8 @@ UI preview는 배치 렌더 검증을 대신하지 않는다. lighting JSON이 �
 ## 9. 서버에서 2프레임 preflight
 
 새 blend와 JSON을 서버의 같은 디렉터리에 복사한 뒤 빈 출력 경로로 실행한다.
+서버 wrapper는 저장소에 검증된 OptiX 580.173.02 라이브러리가 있으면 이를
+자동으로 사용하고, 다른 컴퓨터에서는 시스템 NVIDIA 드라이버로 fallback한다.
 
 ```bash
 cd /workspace/hohyun_ws/AEGIR
