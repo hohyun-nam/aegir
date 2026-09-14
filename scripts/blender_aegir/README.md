@@ -63,6 +63,10 @@ The output already follows the AEGIR Nerfstudio/HDR contract and includes determ
 display PNGs, linear radiance NPY/EXR, metric z-depth, world normals, material AOVs,
 masks, emitter masks, object IDs, camera splits, and emitter metadata.
 
+For the Blender UI procedure to add a new ellipse emissive mesh, disable the
+original panels, author its lighting condition, and render relighting GT, see
+[`docs/BLENDER_RELIGHTING_UI_GUIDE.md`](../../docs/BLENDER_RELIGHTING_UI_GUIDE.md).
+
 ## Split the existing six-panel ceiling emitter for relighting
 
 The `my_room` scene stores its six disconnected emissive ceiling panels in one
