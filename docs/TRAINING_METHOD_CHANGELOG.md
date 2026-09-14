@@ -118,12 +118,13 @@ The Conference wrapper exposes these settings as `ALBEDO_LR`,
   and 0 for true invalid-depth space. RGB, depth, normal, and distortion losses
   still use only the 255 class. Invalid-opacity loss uses only the 0 class, so
   it never asks the 2DGS to open a hole under an analytic emitter.
-- A five-pixel protected band around valid surfaces and exempt emitters allows
+- A protected band around valid surfaces and exempt emitters allows
   finite Gaussian footprints to represent thin structures such as blinds
-  without being punished for slightly overlapping an invalid pane. The Blender
-  full course uses a conservative `INVALID_OPACITY_WEIGHT=0.05`. The protection
-  width is configurable through `INVALID_OPACITY_PROTECTION_RADIUS` (default 5)
-  so 7-pixel thin-structure ablations do not require editing the trainer.
+  without being punished for slightly overlapping an invalid pane. Blender
+  comparison runs showed that weight 0.02 with a 7-pixel band preserves the
+  blinds while still removing window fill and avoiding ceiling holes. The full
+  course therefore fixes `INVALID_OPACITY_WEIGHT=0.02` and
+  `INVALID_OPACITY_PROTECTION_RADIUS=7` as its defaults.
 - `LAMBDA_INVALID_OPACITY=0` preserves earlier pipelines. Class-aware training
   uses a fresh `_noemit_classmask` prepared-data path so an old binary mask is
   not silently reused.
