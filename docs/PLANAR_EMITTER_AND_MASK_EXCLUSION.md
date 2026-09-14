@@ -1,34 +1,50 @@
 # Planar ellipse emitters and emitter-excluded geometry
 
-Effective 2026-09-13, AEGIR represents one physical area light with one bounded
-2D ellipse embedded in 3D. This replaces the learned 3D ellipsoid proxy and its
+AEGIR represents one physical area light with one bounded 2D ellipse embedded
+in 3D. The 2D support replaces the old 3D ellipsoid while retaining learned
 directional spread, falloff, and six signed-axis gains.
 
 ## Representation and transport
 
 Emitter `i` stores center `c_i`, rotation quaternion `q_i`, two semi-axis
-lengths `(a_i, b_i)`, and RGB scene-linear radiance `L_i`. The first two
-rotation columns span the plane and the third column is its emitting normal.
-The emitter is one-sided and Lambertian: radiance is `L_i` over the front
-hemisphere and zero over the back hemisphere. It has no ordinary BRDF while it
-is active.
+lengths `(a_i, b_i)`, RGB scene-linear intensity, three local-axis spreads,
+one falloff power, and six signed-axis gains ordered `+X,-X,+Y,-Y,+Z,-Z`.
+The first two rotation columns span the plane and the third completes its local
+frame. The spatial primitive has zero thickness, but its emission is evaluated
+over the full sphere. In particular, `+Z` and `-Z` learn the two sides
+independently rather than copying one side or forcing either side to zero.
+
+For normalized local outgoing direction `u`, directional radiance is
+
+```text
+angular = sum_j u_j^2 / spread_j^2
+gain = sum softmax(k * [u_x,-u_x,u_y,-u_y,u_z,-u_z]) * axis_gain
+L(u) = RGB * exp(-(angular ^ falloff_power)) * gain
+```
+
+The six positive gains are normalized to arithmetic mean one, leaving common
+RGB responsible for global intensity and chromaticity. The default lobe
+assignment sharpness is `k=12`. All angular parameters and RGB are trainable.
+An active emitter has no ordinary BRDF.
 
 Samples are uniform over the bounded ellipse. Its area and area-to-solid-angle
 PDF are
 
 ```text
 A_i = pi * a_i * b_i
-p_omega = distance^2 / (N_emitters * A_i * cos_light)
+p_omega = distance^2 / (N_emitters * A_i * abs(cos_light))
 ```
 
-where `cos_light` is the projected cosine at the sampled light point. Camera
-rays use an analytic ray-plane intersection followed by the ellipse support
-test. When the ellipse wins the depth test, its emission replaces surface
+where `cos_light` is the projected cosine at the sampled light point. The
+absolute value makes both sides valid while the learned radiance controls how
+much each direction emits. Camera rays use a two-sided analytic ray-plane
+intersection followed by the ellipse support test. When the ellipse wins the
+depth test, its emission replaces surface
 shading and AEGIR skips BRDF and secondary-ray work for that pixel.
 
 `emitters.json` is authoritative when it contains Blender
 `world_bbox_corners`: each physical-panel definition produces exactly one
-ellipse. The box fixes its center, tangent axes, size, and front normal; the
+ellipse. The box fixes its center, tangent axes, size, and local frame; the
 emitter mask and HDR pixels initialize its radiance. If one legacy Blender mesh
 definition contains several disconnected panels, connected components are
 matched through their multi-view 3D centroids and each stable component becomes
@@ -86,12 +102,14 @@ geometry and does not solve the duplicate emitter artifact.
 
 ## Checkpoint compatibility
 
-New checkpoints use format v13 and store two emitter scales. V1-v12
-checkpoints remain loadable for inference and inspection: their two largest
-ellipsoid axes become ellipse tangents, the smallest axis becomes the plane
-normal, and the old directional lobe is collapsed into an approximate front
-radiance. Because optimizer tensors and semantics changed, v1-v12 cannot be
-exactly resumed. Migration also cannot remove emitter Gaussians already learned
+New checkpoints use format v14 and store two emitter scales plus the directional
+parameters. V1-v12 ellipsoid checkpoints remain loadable for inference and
+inspection: their two largest axes become ellipse tangents, the smallest axis
+becomes the plane normal, and their angular field is reordered into that local
+frame. V13 one-sided planar checkpoints receive an initially neutral full-sphere
+field while preserving their front radiance. Because optimizer tensors and
+semantics changed, v1-v13 cannot be exactly resumed. Migration also cannot
+remove emitter Gaussians already learned
 inside an old scene checkpoint; retrain native 2DGS with the exclusion masks
 for that part.
 

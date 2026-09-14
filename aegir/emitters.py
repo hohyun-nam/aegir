@@ -15,15 +15,17 @@ class EmitterState:
     quaternions: Tensor
     scales: Tensor
     colors: Tensor
+    axis_gains: Tensor
+    spreads: Tensor
+    falloff_powers: Tensor
 
 
 class AreaEmitterModel(nn.Module):
-    """Bounded, one-sided Lambertian elliptical emitters embedded in 3D.
+    """Bounded planar ellipses with learned directional emission.
 
     Each emitter is one planar ellipse. ``scales`` stores its two semi-axis
-    lengths, and the third column of its rotation matrix is the emitting front
-    normal. Emitted radiance is constant over that front hemisphere and zero
-    behind it.
+    lengths. Its local frame parameterizes a learned angular spread, falloff,
+    and six independent signed-axis gains over the full sphere.
     """
 
     representation = "planar_ellipse_2d"
@@ -34,10 +36,16 @@ class AreaEmitterModel(nn.Module):
         scales: Tensor,
         colors: Tensor | None = None,
         quaternions: Tensor | None = None,
+        spreads: Tensor | None = None,
+        falloff_powers: Tensor | None = None,
+        axis_gains: Tensor | None = None,
         *,
         min_scale: float = 1.0e-4,
+        min_spread: float = 1.0e-3,
         max_scale: float = 1.0e3,
         max_color: float = 1.0e4,
+        max_spread: float = 32.0,
+        max_falloff_power: float = 32.0,
     ) -> None:
         super().__init__()
         if centers.ndim != 2 or centers.shape[-1] != 3:
@@ -55,14 +63,33 @@ class AreaEmitterModel(nn.Module):
             colors = torch.ones((n, 3), device=device, dtype=dtype)
         if colors.shape != (n, 3):
             raise ValueError("colors must have shape [num_emitters, 3]")
+        if axis_gains is None:
+            axis_gains = torch.ones((n, 6), device=device, dtype=dtype)
+        if axis_gains.shape != (n, 6):
+            raise ValueError("axis_gains must have shape [num_emitters, 6]")
+        if spreads is None:
+            spreads = torch.ones((n, 3), device=device, dtype=dtype)
+        if spreads.shape != (n, 3):
+            raise ValueError("spreads must have shape [num_emitters, 3]")
+        if falloff_powers is None:
+            falloff_powers = torch.ones((n, 1), device=device, dtype=dtype)
+        if falloff_powers.shape != (n, 1):
+            raise ValueError("falloff_powers must have shape [num_emitters, 1]")
 
         self.min_scale = float(min_scale)
+        self.min_spread = float(min_spread)
         self.max_scale = float(max_scale)
         self.max_color = float(max_color)
+        self.max_spread = float(max_spread)
+        self.max_falloff_power = float(max_falloff_power)
         self.centers = nn.Parameter(centers.clone())
         self.raw_quaternions = nn.Parameter(quaternions.clone())
         self.log_scales = nn.Parameter(scales.clamp_min(self.min_scale).log())
         self.log_colors = nn.Parameter(colors.clamp_min(1.0e-6).log())
+        # Order: +X, -X, +Y, -Y, +Z, -Z in the emitter's local frame.
+        self.log_axis_gains = nn.Parameter(axis_gains.clamp_min(1.0e-6).log())
+        self.log_spreads = nn.Parameter(spreads.clamp_min(self.min_spread).log())
+        self.log_falloff_powers = nn.Parameter(falloff_powers.clamp_min(1.0e-3).log())
 
     @property
     def num_emitters(self) -> int:
@@ -84,12 +111,28 @@ class AreaEmitterModel(nn.Module):
     def colors(self) -> Tensor:
         return self.log_colors.exp().clamp_max(self.max_color)
 
+    @property
+    def axis_gains(self) -> Tensor:
+        positive = self.log_axis_gains.exp()
+        return positive / positive.mean(dim=-1, keepdim=True).clamp_min(1.0e-8)
+
+    @property
+    def spreads(self) -> Tensor:
+        return self.log_spreads.exp().clamp(self.min_spread, self.max_spread)
+
+    @property
+    def falloff_powers(self) -> Tensor:
+        return self.log_falloff_powers.exp().clamp(1.0e-3, self.max_falloff_power)
+
     def state(self) -> EmitterState:
         return EmitterState(
             centers=self.centers.detach().clone(),
             quaternions=safe_normalize(self.raw_quaternions.detach().clone(), dim=-1),
             scales=self.scales.detach().clone(),
             colors=self.colors.detach().clone(),
+            axis_gains=self.axis_gains.detach().clone(),
+            spreads=self.spreads.detach().clone(),
+            falloff_powers=self.falloff_powers.detach().clone(),
         )
 
     def subset(self, indices: Sequence[int]) -> AreaEmitterModel:
@@ -109,9 +152,15 @@ class AreaEmitterModel(nn.Module):
             scales=self.scales.detach().index_select(0, index),
             colors=self.colors.detach().index_select(0, index),
             quaternions=safe_normalize(self.raw_quaternions.detach(), dim=-1).index_select(0, index),
+            axis_gains=self.axis_gains.detach().index_select(0, index),
+            spreads=self.spreads.detach().index_select(0, index),
+            falloff_powers=self.falloff_powers.detach().index_select(0, index),
             min_scale=self.min_scale,
+            min_spread=self.min_spread,
             max_scale=self.max_scale,
             max_color=self.max_color,
+            max_spread=self.max_spread,
+            max_falloff_power=self.max_falloff_power,
         )
 
     @torch.no_grad()
@@ -161,11 +210,39 @@ class AreaEmitterModel(nn.Module):
         self.log_colors.data = torch.nan_to_num(
             self.log_colors.data, nan=0.0, posinf=color_max, neginf=color_min
         ).clamp_(color_min, color_max)
+        self.log_axis_gains.data = torch.nan_to_num(
+            self.log_axis_gains.data, nan=0.0, posinf=12.0, neginf=-12.0
+        ).clamp_(-12.0, 12.0)
+        spread_min = float(torch.log(torch.tensor(self.min_spread)))
+        spread_max = float(torch.log(torch.tensor(self.max_spread)))
+        self.log_spreads.data = torch.nan_to_num(
+            self.log_spreads.data, nan=0.0, posinf=spread_max, neginf=spread_min
+        ).clamp_(spread_min, spread_max)
+        power_min = float(torch.log(torch.tensor(1.0e-3)))
+        power_max = float(torch.log(torch.tensor(self.max_falloff_power)))
+        self.log_falloff_powers.data = torch.nan_to_num(
+            self.log_falloff_powers.data, nan=0.0, posinf=power_max, neginf=power_min
+        ).clamp_(power_min, power_max)
 
     @staticmethod
-    def _front_mask(omega_out: Tensor, rotations: Tensor) -> Tensor:
-        local = torch.einsum("...i,...ij->...j", safe_normalize(omega_out, dim=-1), rotations)
-        return local[..., 2:3] > 0.0
+    def _signed_axis_weights(local_direction: Tensor, sharpness: float) -> Tensor:
+        if sharpness <= 0.0:
+            raise ValueError("axis_lobe_sharpness must be positive")
+        x, y, z = local_direction.unbind(dim=-1)
+        signed_alignment = torch.stack((x, -x, y, -y, z, -z), dim=-1)
+        return torch.softmax(float(sharpness) * signed_alignment, dim=-1)
+
+    def _axis_direction_gain(
+        self,
+        local_direction: Tensor,
+        gains: Tensor,
+        axis_lobe_sharpness: float,
+        use_axis_gains: bool,
+    ) -> Tensor:
+        if not use_axis_gains:
+            return local_direction.new_ones(local_direction.shape[:-1] + (1,))
+        weights = self._signed_axis_weights(local_direction, axis_lobe_sharpness)
+        return (weights * gains).sum(dim=-1, keepdim=True)
 
     def radiance(
         self,
@@ -174,21 +251,24 @@ class AreaEmitterModel(nn.Module):
         axis_lobe_sharpness: float = 12.0,
         use_axis_gains: bool = True,
     ) -> Tensor:
-        """Return constant front-hemisphere radiance for every planar emitter."""
+        """Evaluate learned radiance along emitter-outgoing directions."""
 
-        del axis_lobe_sharpness, use_axis_gains
         if omega_out.ndim == 1:
             omega_out = omega_out.unsqueeze(-2).expand(self.num_emitters, 3)
         elif omega_out.shape[-2] != self.num_emitters:
             omega_out = omega_out.unsqueeze(-2).expand(
                 omega_out.shape[:-1] + (self.num_emitters, 3)
             )
-        rotations = self.rotations.view(
-            (1,) * (omega_out.ndim - 2) + self.rotations.shape
+        local = torch.einsum(
+            "...ei,eij->...ej", safe_normalize(omega_out, dim=-1), self.rotations
         )
-        mask = self._front_mask(omega_out, rotations).to(omega_out)
-        colors = self.colors.view((1,) * (omega_out.ndim - 2) + self.colors.shape)
-        return colors * mask
+        angular = (local.pow(2.0) / self.spreads.pow(2.0)).sum(dim=-1, keepdim=True)
+        falloff = torch.exp(-angular.clamp_min(0.0).pow(self.falloff_powers))
+        direction_gain = self._axis_direction_gain(
+            local, self.axis_gains, axis_lobe_sharpness, use_axis_gains
+        )
+        colors = self.colors.view((1,) * (falloff.ndim - 2) + self.colors.shape)
+        return colors * falloff * direction_gain
 
     def radiance_for_ids(
         self,
@@ -198,10 +278,23 @@ class AreaEmitterModel(nn.Module):
         axis_lobe_sharpness: float = 12.0,
         use_axis_gains: bool = True,
     ) -> Tensor:
-        del axis_lobe_sharpness, use_axis_gains
         rotations = self.rotations[emitter_ids]
-        mask = self._front_mask(omega_out, rotations).to(omega_out)
-        return self.colors[emitter_ids] * mask
+        local = torch.einsum(
+            "...i,...ij->...j", safe_normalize(omega_out, dim=-1), rotations
+        )
+        spreads = self.spreads[emitter_ids]
+        angular = (local.pow(2.0) / spreads.pow(2.0)).sum(dim=-1, keepdim=True)
+        direction_gain = self._axis_direction_gain(
+            local,
+            self.axis_gains[emitter_ids],
+            axis_lobe_sharpness,
+            use_axis_gains,
+        )
+        return (
+            self.colors[emitter_ids]
+            * torch.exp(-angular.clamp_min(0.0).pow(self.falloff_powers[emitter_ids]))
+            * direction_gain
+        )
 
     @staticmethod
     def _sample_unit_disk(shape: tuple[int, ...], device, dtype, generator=None) -> Tensor:
@@ -285,15 +378,18 @@ class AreaEmitterModel(nn.Module):
             projected_cosine = torch.ones_like(distances)
         else:
             normals = self.normals[emitter_ids]
-            projected_cosine = (-safe_normalize(directions_to_light, dim=-1) * normals).sum(
-                dim=-1, keepdim=True
-            ).clamp_min(1.0e-6)
+            projected_cosine = (
+                (-safe_normalize(directions_to_light, dim=-1) * normals)
+                .sum(dim=-1, keepdim=True)
+                .abs()
+                .clamp_min(1.0e-6)
+            )
         return distances.square() / (
             self.num_emitters * areas * projected_cosine + 1.0e-6
         )
 
     def intersect(self, ray_o: Tensor, ray_d: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        """Intersect rays with the front face of every bounded planar ellipse."""
+        """Intersect rays with either side of every bounded planar ellipse."""
 
         o = ray_o.reshape(-1, 3)
         d = safe_normalize(ray_d.reshape(-1, 3), dim=-1)
@@ -306,7 +402,7 @@ class AreaEmitterModel(nn.Module):
         )
         hit_l = o_l + t[..., None] * d_l
         ellipse = (hit_l[..., :2] / self.scales[None]).square().sum(dim=-1) <= 1.0
-        valid = (denom < -1.0e-8) & (t > 1.0e-5) & ellipse
+        valid = (denom.abs() > 1.0e-8) & (t > 1.0e-5) & ellipse
         t = torch.where(valid, t, torch.full_like(t, torch.inf))
         min_t, idx = t.min(dim=-1)
         hit = torch.isfinite(min_t)
@@ -323,7 +419,13 @@ class AreaEmitterModel(nn.Module):
             scales=state.scales.to(self.centers.device),
             colors=state.colors.to(self.centers.device),
             quaternions=state.quaternions.to(self.centers.device),
+            axis_gains=state.axis_gains.to(self.centers.device),
+            spreads=state.spreads.to(self.centers.device),
+            falloff_powers=state.falloff_powers.to(self.centers.device),
             min_scale=self.min_scale,
+            min_spread=self.min_spread,
             max_scale=self.max_scale,
             max_color=self.max_color,
+            max_spread=self.max_spread,
+            max_falloff_power=self.max_falloff_power,
         )

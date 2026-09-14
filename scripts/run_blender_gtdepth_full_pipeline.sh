@@ -20,7 +20,7 @@ DN_OUTPUT="${DN_OUTPUT:-$AEGIR_ROOT/outputs/2dgs_gtdepth_voxel010_noemit_l1_20k_
 DN_LOG="${DN_LOG:-$AEGIR_ROOT/logs/2dgs_gtdepth_voxel010_noemit_l1_20k_densify10k_20260913}"
 DN_CKPT="$DN_OUTPUT/$SCENE/nerfstudio_models/step-000020000.pt"
 HDR_DIAG="${HDR_DIAG:-$AEGIR_ROOT/outputs/hdr_emitter_preflight_20260901/$SCENE}"
-AEGIR_OUTPUT="${AEGIR_OUTPUT:-$AEGIR_ROOT/outputs/aegir_${SCENE}_planar_emitters_noemit_2dgs20k_bounce1_20260913/$SCENE}"
+AEGIR_OUTPUT="${AEGIR_OUTPUT:-$AEGIR_ROOT/outputs/aegir_${SCENE}_planar_directional_emitters_noemit_2dgs20k_bounce1_20260914/$SCENE}"
 PIPELINE_LOG="$AEGIR_OUTPUT/full_pipeline.log"
 TIMING="$AEGIR_OUTPUT/full_pipeline_timing.tsv"
 
@@ -54,7 +54,7 @@ echo "$(date --iso-8601=seconds) Blender GT-depth full pipeline START"
 echo "scene=$SCENE"
 echo "data=$DATA"
 echo "2DGS: emitter-excluded GT Z-depth/RGB masks, L1 depth, lambda_depth=0.2, lambda_dist=0, densify_until=10000, grad=0.0005"
-echo "AEGIR: geometry frozen, culling off, raster=256, origin_offset=0.15m, secondary-only train_bounce_samples=1 inspect_bounce_samples=8"
+echo "AEGIR: directional planar emitters, geometry frozen, culling off, raster=256, origin_offset=0.15m, secondary-only train_bounce_samples=1 inspect_bounce_samples=8"
 
 echo "[1/7] Validate rendered Blender dataset"
 "$PYTHON" scripts/blender_aegir/validate_dataset.py --data "$DATA"
@@ -147,7 +147,7 @@ else
 fi
 test -s "$PRIORS/manifest.json"
 
-echo "[7/7] Train frozen-geometry planar-emitter AEGIR 20K, inspect 30 views, export PLY"
+echo "[7/7] Train frozen-geometry directional-planar-emitter AEGIR 20K, inspect 30 views, export PLY"
 GEOMETRY="$DN_CKPT" \
 DATA="$DATA" \
 PRIORS="$PRIORS" \
@@ -171,6 +171,7 @@ from pathlib import Path
 import torch
 
 checkpoint = torch.load("$AEGIR_OUTPUT/aegir_20k.pt", map_location="cpu", weights_only=False)
+assert checkpoint["format"] == "aegir_shared_gaussian_v14"
 assert checkpoint["config"]["training"]["training_transport_mode"] == "secondary_only"
 assert checkpoint["config"]["render"]["num_bounce_samples"] == 1
 metrics_path = Path("$AEGIR_OUTPUT/inspect_compare30/inspect_secondary_bounce/metrics.json")

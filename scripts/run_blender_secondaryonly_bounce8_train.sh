@@ -12,7 +12,7 @@ SCENE="blender_my_room_single_room_heightdiverse_20260901_intrinsics_fixed"
 GEOMETRY="$AEGIR_ROOT/outputs/2dgs_gtdepth_voxel010_l1_20k_20260909/$SCENE/nerfstudio_models/step-000020000.pt"
 DATA="$WORKSPACE/datasets/aegir_nerfstudio/$SCENE"
 PRIORS="$WORKSPACE/datasets/diffusionrenderer_priors/blender_my_room_single_room_heightdiverse_20260901"
-OUTPUT_ROOT="${OUTPUT_ROOT:-$AEGIR_ROOT/outputs/aegir_blender_gtdepth_voxel010_shdc_white0_secondaryonly_bounce8_chunk8192_20260912/$SCENE}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$AEGIR_ROOT/outputs/aegir_blender_gtdepth_planar_directional_shdc_white0_secondaryonly_bounce8_v14_20260914/$SCENE}"
 CHECKPOINT="$OUTPUT_ROOT/aegir_20k.pt"
 LOG="$OUTPUT_ROOT/direct_train.log"
 
@@ -43,7 +43,21 @@ exec > >(tee -a "$LOG") 2>&1
 cd "$AEGIR_ROOT"
 
 if [[ -s "$CHECKPOINT" ]]; then
-  echo "completed checkpoint already exists: $CHECKPOINT"
+  checkpoint_format=$(
+    "$PYTHON" - "$CHECKPOINT" <<'PY'
+import sys
+
+import torch
+
+payload = torch.load(sys.argv[1], map_location="cpu", weights_only=False)
+print(payload.get("format", "unknown"))
+PY
+  )
+  if [[ "$checkpoint_format" != "aegir_shared_gaussian_v14" ]]; then
+    echo "completed checkpoint uses $checkpoint_format; choose a new OUTPUT_ROOT for directional training" >&2
+    exit 2
+  fi
+  echo "completed directional checkpoint already exists: $CHECKPOINT"
   exit 0
 fi
 
@@ -65,9 +79,9 @@ payload = torch.load(sys.argv[1], map_location="cpu", weights_only=False)
 print(payload.get("format", "unknown"))
 PY
   )
-  if [[ "$resume_format" != "aegir_shared_gaussian_v13" ]]; then
+  if [[ "$resume_format" != "aegir_shared_gaussian_v14" ]]; then
     echo "cannot exactly resume legacy checkpoint $resume ($resume_format)" >&2
-    echo "v1-v12 checkpoints remain usable for inspection, but planar-emitter training must use a new OUTPUT_ROOT" >&2
+    echo "v1-v13 checkpoints remain usable for inspection, but directional planar-emitter training must use a new OUTPUT_ROOT" >&2
     exit 2
   fi
   echo "Resuming secondary-only bounce-8 training from: $resume"

@@ -21,7 +21,8 @@ is not required by the shared-Gaussian implementation.
   scene-exposure plus Reinhard+sRGB fallback
 - training/evaluation share the same LDR transform, and raw float HDR/metric
   arrays remain separate from display PNGs
-- one bounded, one-sided Lambertian planar ellipse per physical emitter;
+- one bounded planar ellipse with learned full-sphere spread, falloff, and six
+  signed-axis direction gains per physical emitter;
   Blender panel bounding boxes preserve one-to-one identity; stable multi-view
   mask components split legacy compound meshes, with mask/depth PCA as fallback
 - emitter masks exclude fixtures from GT-depth seed points and all native-2DGS
@@ -32,7 +33,7 @@ is not required by the shared-Gaussian implementation.
 - full-view, validity-aware focus-map computation followed by exact training-patch crop
 - current default emitter optimization fixes initialized center/rotation,
   constrains two ellipse radii to `0.1x-1.0x` of their seed, and disables
-  split/prune while learning RGB radiance; historical adaptive
+  split/prune while learning RGB radiance and its directional field; historical adaptive
   split/prune remains opt-in
 - DN-style scene-Gaussian refinement: after warm-up and full training-view
   statistics coverage, remove only opacity below 0.005; replace high-gradient
@@ -44,12 +45,12 @@ is not required by the shared-Gaussian implementation.
 - differentiable explicit-emitter NEE at the first IRGS hit, cross-faded 0-to-1
   over steps 5K-15K and used exclusively after step 15K and at inference; no SH fallback
 - shared checkpoint containing all Gaussian geometry and BRDF tensors
-- exact-resume v13 checkpoint containing frozen full SH and planar emitters,
+- exact-resume v14 checkpoint containing frozen full SH and directional planar emitters,
   emitter scale anchors, and geometry/material/emitter Adam states,
   Python/NumPy/CPU/CUDA RNG states, next global step, fixed bounds and surface
   anchors, frame identity, emitter-adaptation state, and accumulated scene-refinement state
 - `train-gaussian-scene --resume` restarts at the saved global step without
-  replaying learning-rate, adaptation, or refinement schedules; v1-v12 remain inference-only
+  replaying learning-rate, adaptation, or refinement schedules; v1-v13 remain inference-only
 - all-view inspection by re-rasterization
 - checkpointed pre-training emitter state and automatic initial/final emitter
   comparison in world and camera views
@@ -65,8 +66,8 @@ first optimizer step. Standard inspection writes:
   oriented planar ellipses
 - `emitter_evolution_frames/`: the same ellipses projected into every camera
 - `emitter_evolution_sequence.gif`: all camera overlays as an animation
-- `emitter_evolution.json`: centers, two radii, normal, area, quaternions, anisotropy,
-  and matched center movement
+- `emitter_evolution.json`: centers, two radii, local frame, area, quaternions,
+  anisotropy, six signed-axis gains, spreads, falloff, and matched center movement
 
 The cyan dashed ellipse is the initialization, the green solid ellipse is
 the trained result, and the yellow segment connects the nearest one-to-one

@@ -66,6 +66,9 @@ def configure_emitter_optimization(
         "raw_quaternions": training.optimize_emitter_rotations,
         "log_scales": training.optimize_emitter_scales,
         "log_colors": True,
+        "log_axis_gains": True,
+        "log_spreads": True,
+        "log_falloff_powers": True,
     }
     parameters = []
     for name, parameter in emitters.named_parameters():

@@ -23,7 +23,8 @@ One geometry checkpoint provides a single set of trainable planar 2D Gaussians:
 
 - geometry: mean, two tangent log-scales, quaternion, opacity logit
 - material: albedo, roughness, metallic per Gaussian
-- lighting: one bounded planar 2D ellipse per physical area emitter
+- lighting: one bounded planar 2D ellipse per physical area emitter, with
+  learned full-sphere directional radiance
 
 Every camera differentiably rasterizes these shared Gaussian attributes into a
 temporary G-buffer. There are no trainable per-camera material maps.
@@ -149,7 +150,8 @@ stored separately from visualization PNGs.
   before freeze. Frozen geometry also disables scene refinement
 - the current decomposition default fixes planar-emitter centers and rotations,
   learns the two ellipse radii only within `0.1x-1.0x` of initialization,
-  learns scene-linear RGB radiance, and disables emitter split/prune
+  learns scene-linear RGB, three-axis spread, falloff power, and six signed-axis
+  direction gains, and disables emitter split/prune
 - the historical adaptive-emitter baseline remains available with
   `--optimize-emitter-centers --optimize-emitter-rotations
   --unconstrained-emitter-scales --enable-emitter-adaptation`; adaptive
@@ -162,7 +164,7 @@ stored separately from visualization PNGs.
 
 ## Exact checkpoint resume
 
-Trainer-produced v13 checkpoints store planar ellipse emitters, the independent SH fade schedule and
+Trainer-produced v14 checkpoints store directional planar ellipse emitters, the independent SH fade schedule and
 identify active-parameter clipping semantics, along with frozen DN full-SH features, the
 three Adam optimizer states, Python, NumPy, CPU/CUDA RNG states, the next global
 step, fixed scene bounds and surface anchors, selected training frames, and
@@ -185,7 +187,7 @@ final global-step target with:
 training config is authoritative; resume only changes that target and the
 output path. Exact resume deliberately rejects changed DN checkpoints, dataset
 or prior paths, selected frame identities, and visible CUDA-device counts.
-Checkpoint formats v1-v12 remain loadable for inspection/inference but cannot be
+Checkpoint formats v1-v13 remain loadable for inspection/inference but cannot be
 passed to `--resume`, because their training semantics predate the current
 active-parameter clipping semantics. `--emitter-checkpoint` is only an emitter warm start and is
 mutually exclusive with exact resume.

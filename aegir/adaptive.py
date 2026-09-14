@@ -72,12 +72,18 @@ def adapt_emitters(
         quaternions=state.quaternions[keep],
         scales=state.scales[keep],
         colors=state.colors[keep],
+        axis_gains=state.axis_gains[keep],
+        spreads=state.spreads[keep],
+        falloff_powers=state.falloff_powers[keep],
     )
 
     centers = []
     quats = []
     scales = []
     colors = []
+    axis_gains = []
+    spreads = []
+    powers = []
     new_to_old = []
     child_mask = []
     emitter_count = int(state.centers.shape[0])
@@ -98,6 +104,9 @@ def adapt_emitters(
                 quats.append(state.quaternions[i])
                 scales.append(child_scale)
                 colors.append(state.colors[i] * 0.5)
+                axis_gains.append(state.axis_gains[i])
+                spreads.append(state.spreads[i])
+                powers.append(state.falloff_powers[i])
                 new_to_old.append(kept_old_indices[i])
                 child_mask.append(True)
             emitter_count += 1
@@ -107,6 +116,9 @@ def adapt_emitters(
         quats.append(state.quaternions[i])
         scales.append(state.scales[i])
         colors.append(state.colors[i])
+        axis_gains.append(state.axis_gains[i])
+        spreads.append(state.spreads[i])
+        powers.append(state.falloff_powers[i])
         new_to_old.append(kept_old_indices[i])
         child_mask.append(False)
 
@@ -115,6 +127,9 @@ def adapt_emitters(
         quaternions=torch.stack(quats),
         scales=torch.stack(scales),
         colors=torch.stack(colors),
+        axis_gains=torch.stack(axis_gains),
+        spreads=torch.stack(spreads),
+        falloff_powers=torch.stack(powers),
     )
     changed = new_state.centers.shape[0] != emitters.num_emitters or not bool(keep.all())
     mapping = torch.stack(new_to_old).long()

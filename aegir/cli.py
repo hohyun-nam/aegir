@@ -180,13 +180,13 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument(
         "--symmetric-emission",
         action="store_true",
-        help="deprecated compatibility flag; planar emission is always one-sided Lambertian",
+        help="disable learned signed-axis gains while retaining symmetric spread/falloff",
     )
     train.add_argument(
         "--emitter-axis-lobe-sharpness",
         type=float,
         default=12.0,
-        help="deprecated compatibility value ignored by planar emitters",
+        help="soft assignment sharpness for the six learned local-axis gains",
     )
     train.add_argument("--no-indirect", action="store_true")
 
@@ -230,7 +230,7 @@ def build_parser() -> argparse.ArgumentParser:
     inspect.add_argument(
         "--symmetric-emission",
         action="store_true",
-        help="render with the original front/back-symmetric emission model",
+        help="render without the checkpoint's learned signed-axis gains",
     )
     inspect.add_argument(
         "--denoise-indirect",
@@ -280,7 +280,7 @@ def build_parser() -> argparse.ArgumentParser:
     camera_path.add_argument(
         "--symmetric-emission",
         action="store_true",
-        help="render with the original front/back-symmetric emission model",
+        help="render without the checkpoint's learned signed-axis gains",
     )
     return parser
 

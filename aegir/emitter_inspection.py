@@ -86,6 +86,9 @@ def _cpu_state(state: dict[str, Tensor]) -> dict[str, Tensor]:
 
 def _emitter_record(state: dict[str, Tensor], index: int) -> dict[str, Any]:
     scales = state["scales"][index]
+    local_z = quat_to_matrix(
+        safe_normalize(state["quaternions"][index : index + 1], dim=-1)
+    )[0, :, 2].tolist()
     record = {
         "index": index,
         "center": state["centers"][index].tolist(),
@@ -93,11 +96,19 @@ def _emitter_record(state: dict[str, Tensor], index: int) -> dict[str, Any]:
         "anisotropy": float(scales.max() / scales.min().clamp_min(1.0e-8)),
         "quaternion": state["quaternions"][index].tolist(),
         "color": state["colors"][index].tolist(),
-        "emitting_normal": quat_to_matrix(
-            safe_normalize(state["quaternions"][index : index + 1], dim=-1)
-        )[0, :, 2].tolist(),
+        "local_z_axis": local_z,
+        # Retained for consumers of v13 inspection JSON. Directional v14
+        # emitters use this as a frame axis rather than a one-sided normal.
+        "emitting_normal": local_z,
         "area": float(math.pi * scales.prod()),
     }
+    if "axis_gains" in state:
+        record["axis_gain_order"] = ["+X", "-X", "+Y", "-Y", "+Z", "-Z"]
+        record["axis_gains"] = state["axis_gains"][index].tolist()
+    if "spreads" in state:
+        record["spreads"] = state["spreads"][index].tolist()
+    if "falloff_powers" in state:
+        record["falloff_power"] = float(state["falloff_powers"][index, 0])
     return record
 
 

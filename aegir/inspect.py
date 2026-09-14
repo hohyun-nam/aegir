@@ -312,7 +312,7 @@ def inspect_checkpoint(
             "active_emitter_indices": list(active_emitter_indices),
             "active_emitter_count": emitters.num_emitters,
             "emitter_representation": emitters.representation,
-            "emission_model": "one_sided_lambertian",
+            "emission_model": "learned_directional_full_sphere",
             "six_axis_emission": config.render.six_axis_emission,
             "emitter_axis_lobe_sharpness": config.render.emitter_axis_lobe_sharpness,
             "render_chunk_size": 256,

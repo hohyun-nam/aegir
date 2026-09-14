@@ -33,9 +33,9 @@ class RenderConfig:
     # Composite learned emitter self-emission when a planar ellipse is hit
     # before the camera-visible Gaussian surface.
     camera_visible_emitters: bool = True
-    # Legacy checkpoint/CLI fields. Planar emitters use one-sided constant
-    # radiance, so these values are accepted but ignored.
-    six_axis_emission: bool = False
+    # Blend learned local +X/-X/+Y/-Y/+Z/-Z gains into the planar emitter's
+    # full-sphere directional radiance. Disable only for the symmetric ablation.
+    six_axis_emission: bool = True
     emitter_axis_lobe_sharpness: float = 12.0
     visibility_occluders: int = 2048
     visibility_radius: float = 0.035

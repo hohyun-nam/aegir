@@ -193,7 +193,7 @@ def test_explicit_secondary_nee_runs_through_irgs_and_backpropagates() -> None:
     )
     emitters = AreaEmitterModel(
         centers=torch.tensor([[0.1, 0.0, -1.0]], device="cuda"),
-        scales=torch.tensor([[0.2, 0.1, 0.05]], device="cuda"),
+        scales=torch.tensor([[0.2, 0.1]], device="cuda"),
         colors=torch.full((1, 3), 2.0, device="cuda"),
     )
 

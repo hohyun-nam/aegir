@@ -53,12 +53,14 @@ Git commit: `b4392c0` (`Add six-axis emitters and corrected AEGIR transport pipe
 
 ## Current default method
 
-Effective from 2026-09-13:
+Effective from 2026-09-14:
 
 - Each physical emitter is one bounded planar ellipse with center, quaternion,
-  two radii, and scene-linear RGB radiance. It emits constant radiance from its
-  front side and zero from its back side. The old third scale, signed-axis
-  gains, angular spread, and falloff parameters are removed.
+  two radii, and learned full-sphere directional radiance. The spatial third
+  scale remains removed. Common scene-linear RGB, three-axis spread, falloff
+  power, and six local signed-axis gains (`+X,-X,+Y,-Y,+Z,-Z`) are trainable.
+  Thus the two plane sides learn independently instead of sharing radiance or
+  forcing the back side to zero.
 - Blender `emitters.json` panel bounding boxes preserve one physical panel to
   one ellipse. Stable multi-view mask components split a legacy compound mesh;
   masks and metric depth remain the fallback when panel metadata is absent.
@@ -67,7 +69,7 @@ Effective from 2026-09-13:
   gradients or densification candidates.
 - Camera-visible emitter pixels use emission only and skip BRDF/secondary-ray
   shading.
-- Checkpoint v13 is exactly resumable. V1-v12 are migrated to planar emitters
+- Checkpoint v14 is exactly resumable. V1-v13 are migrated to planar emitters
   for inference/inspection only.
 
 - Emitter centers and rotations are fixed at their initialized values.
@@ -76,7 +78,7 @@ Effective from 2026-09-13:
   cluster but cannot grow into a larger camera-visible proxy.
 - Emitter split/prune is disabled. Emitter identity and count therefore remain
   stable unless the historical mode is explicitly enabled.
-- Common emitter RGB radiance remains trainable.
+- Common emitter RGB, signed-axis gains, spread, and falloff remain trainable.
 - Albedo initializes from DN SH DC appearance by default, using the historical
   `(0.5 + SH_C0 * DC).clamp(0.02, 0.98)` formula without an additional color
   conversion. Neutral RGB `(0.5, 0.5, 0.5)` remains an explicit option.
@@ -93,7 +95,7 @@ Effective from 2026-09-13:
 - Zero-LR groups disable gradients and do not participate in clipping. Frozen
   geometry skips BVH rebuilds/refinement, and fully frozen scene parameters
   skip the material prior/TV training terms (logged as zero, not measured errors).
-- Checkpoint v13 stores the initialization-relative emitter scale anchors and
+- Checkpoint v14 stores the directional emitter state, initialization-relative emitter scale anchors and
   both material optimizer groups, and identifies the full-view material-prior
   objective, independent SH schedule, and active clipping semantics for exact resume.
 
@@ -104,6 +106,23 @@ The Conference wrapper exposes these settings as `ALBEDO_LR`,
 `EMITTER_ADAPTATION`, plus `LIGHT_WHITE` and `LIGHT_WHITE_RAMP_END`.
 
 ## Chronological changes
+
+### 2026-09-14 — Learned directional emission on planar ellipse support
+
+- Kept one bounded 2D ellipse per physical panel and restored the previous
+  anisotropic emission field: common RGB, three local-axis spreads, falloff
+  power, and six normalized signed-axis gains.
+- Emission is evaluated over the full sphere. `+Z` and `-Z` are separate learned
+  gains, so this does not assume equal two-sided emission. Local `+/-X` and
+  `+/-Y` gains model off-normal directions, with soft assignment sharpness 12.
+- Changed analytic ellipse intersection to accept either side and changed the
+  area-to-solid-angle Jacobian to use `abs(n dot omega)`. Directional radiance,
+  rather than intersection orientation, determines emitted energy.
+- Made all angular parameters part of the emitter Adam group. Center/rotation
+  remain fixed and the two radii retain their configured `0.1x-1.0x` bounds.
+- Added v14 checkpoints because v13 optimizer state lacks directional tensors.
+  V13 remains loadable for inference with its recorded front radiance preserved
+  and a neutral directional initialization, but cannot be exactly resumed.
 
 ### 2026-09-12 — Configurable secondary-ray launch chunking
 

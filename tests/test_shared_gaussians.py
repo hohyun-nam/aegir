@@ -274,7 +274,10 @@ def test_default_emitter_policy_fixes_pose_and_constrains_scale() -> None:
     assert not emitters.raw_quaternions.requires_grad
     assert emitters.log_scales.requires_grad
     assert any(parameter is emitters.log_colors for parameter in parameters)
-    assert len(parameters) == 2
+    assert len(parameters) == 5
+    assert any(parameter is emitters.log_axis_gains for parameter in parameters)
+    assert any(parameter is emitters.log_spreads for parameter in parameters)
+    assert any(parameter is emitters.log_falloff_powers for parameter in parameters)
     assert not config.adaptive.enabled
 
     anchors = emitters.scales.detach().clone()
@@ -638,15 +641,25 @@ def test_rotated_planar_emitter_intersection_uses_bounded_local_ellipse() -> Non
             2.5 * rotation[:, 0] + 2.0 * normal,
             0.9 * rotation[:, 1] + 2.0 * normal,
             1.1 * rotation[:, 1] + 2.0 * normal,
+            0.9 * rotation[:, 1] - 2.0 * normal,
         )
     )
-    directions = -normal.expand_as(origins)
+    directions = torch.stack((-normal, -normal, -normal, normal))
     hit, distance, emitter_ids = emitters.intersect(origins, directions)
 
-    assert hit.tolist() == [True, True, False]
-    assert emitter_ids.tolist() == [0, 0, 0]
-    assert torch.allclose(distance[:2, 0], torch.full((2,), 2.0), atol=1.0e-5)
+    assert hit.tolist() == [True, True, False, True]
+    assert emitter_ids.tolist() == [0, 0, 0, 0]
+    assert torch.allclose(distance[[0, 1, 3], 0], torch.full((3,), 2.0), atol=1.0e-5)
     assert torch.isinf(distance[2, 0])
+
+
+def test_planar_emitter_directional_pdf_uses_both_sides() -> None:
+    emitters = AreaEmitterModel(torch.zeros((1, 3)), torch.ones((1, 2)))
+    distances = torch.full((2, 1), 2.0)
+    ids = torch.zeros(2, dtype=torch.long)
+    directions = torch.tensor([[0.0, 0.0, 1.0], [0.0, 0.0, -1.0]])
+    pdf = emitters.light_pdf_surrogate(distances, ids, directions)
+    assert torch.allclose(pdf[0], pdf[1])
 
 
 def test_emitter_radiance_apis_share_world_to_local_convention() -> None:
@@ -670,16 +683,23 @@ def test_emitter_radiance_apis_share_world_to_local_convention() -> None:
     assert torch.allclose(all_emitters, selected_emitters, atol=1.0e-7)
 
 
-def test_planar_emission_is_constant_on_front_and_zero_on_back() -> None:
+def test_planar_emission_learns_front_and_back_independently() -> None:
     emitters = AreaEmitterModel(
         centers=torch.zeros((1, 3)),
         scales=torch.ones((1, 2)),
         colors=torch.tensor([[3.0, 2.0, 1.0]]),
+        axis_gains=torch.tensor([[1.0, 1.0, 1.0, 1.0, 4.0, 0.25]]),
+        spreads=torch.tensor([[1.0, 1.0, 2.0]]),
     )
-    directions = torch.tensor([[0.3, 0.0, 1.0], [-0.2, 0.1, 1.0], [0.0, 0.0, -1.0]])
-    radiance = emitters.radiance_for_ids(directions, torch.zeros(3, dtype=torch.long))
-    assert torch.allclose(radiance[:2], emitters.colors.expand(2, 3))
-    assert torch.count_nonzero(radiance[2]) == 0
+    directions = torch.tensor([[0.0, 0.0, 1.0], [0.0, 0.0, -1.0]])
+    radiance = emitters.radiance_for_ids(directions, torch.zeros(2, dtype=torch.long))
+    assert torch.all(radiance > 0.0)
+    assert torch.all(radiance[0] > radiance[1])
+
+    radiance.sum().backward()
+    assert torch.count_nonzero(emitters.log_axis_gains.grad) > 0
+    assert torch.count_nonzero(emitters.log_spreads.grad) > 0
+    assert torch.count_nonzero(emitters.log_falloff_powers.grad) > 0
 
 
 def test_planar_emission_receives_color_gradient() -> None:
@@ -786,7 +806,7 @@ def test_shared_checkpoint_round_trip(tmp_path: Path) -> None:
     )
 
 
-def test_v8_ellipsoid_checkpoint_migrates_to_one_sided_planar_emitter(tmp_path: Path) -> None:
+def test_v8_ellipsoid_checkpoint_preserves_directional_planar_emitter(tmp_path: Path) -> None:
     source = tmp_path / "gaussians.pt"
     output = tmp_path / "v8.pt"
     make_export(source)
@@ -802,7 +822,7 @@ def test_v8_ellipsoid_checkpoint_migrates_to_one_sided_planar_emitter(tmp_path: 
         "colors": torch.tensor([[3.0, 2.0, 1.0]]),
         "spreads": torch.ones((1, 3)),
         "falloff_powers": torch.ones((1, 1)),
-        "axis_gains": torch.ones((1, 6)),
+        "axis_gains": torch.tensor([[1.0, 1.0, 1.0, 1.0, 4.0, 0.25]]),
     }
     torch.save(payload, output)
 
@@ -813,7 +833,35 @@ def test_v8_ellipsoid_checkpoint_migrates_to_one_sided_planar_emitter(tmp_path: 
     front_radiance = restored_emitters.radiance_for_ids(front, torch.zeros(1, dtype=torch.long))
     back_radiance = restored_emitters.radiance_for_ids(-front, torch.zeros(1, dtype=torch.long))
     assert torch.all(front_radiance > 0.0)
-    assert torch.count_nonzero(back_radiance) == 0
+    assert torch.all(front_radiance > back_radiance)
+
+
+def test_v13_planar_checkpoint_preserves_front_radiance_with_neutral_directionality(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "gaussians.pt"
+    output = tmp_path / "v13.pt"
+    make_export(source)
+    scene = GaussianMaterialBackend(source)
+    emitters = AreaEmitterModel(
+        torch.zeros((1, 3)),
+        torch.full((1, 2), 0.1),
+        colors=torch.tensor([[3.0, 2.0, 1.0]]),
+    )
+    save_checkpoint(output, scene, emitters, AEGIRConfig(), 0, [], {})
+    payload = torch.load(output, map_location="cpu", weights_only=False)
+    payload["format"] = "aegir_shared_gaussian_v13"
+    for key in ("axis_gains", "spreads", "falloff_powers"):
+        payload["emitter_state"].pop(key)
+    payload.pop("emitter_raw_state")
+    torch.save(payload, output)
+
+    _, restored, _ = load_checkpoint(output, "cpu")
+    ids = torch.zeros(1, dtype=torch.long)
+    front = restored.radiance_for_ids(restored.normals, ids)
+    back = restored.radiance_for_ids(-restored.normals, ids)
+    assert torch.allclose(front, payload["emitter_state"]["colors"], atol=1.0e-5)
+    assert torch.allclose(back, front, atol=1.0e-5)
 
 
 def test_v1_checkpoint_is_planarized_when_loaded(tmp_path: Path) -> None:
@@ -1223,10 +1271,13 @@ def test_camera_visible_emitter_replaces_and_skips_surface_shading(monkeypatch) 
     )
 
     assert torch.equal(rendered["emitter_mask"], torch.ones((1, 1)))
-    assert torch.allclose(rendered["emission_hdr"], expected_radiance, atol=1.0e-6)
+    expected_directional = emitters.radiance_for_ids(
+        torch.tensor([[0.0, 0.0, -1.0]]), torch.zeros(1, dtype=torch.long)
+    )
+    assert torch.allclose(rendered["emission_hdr"], expected_directional, atol=1.0e-6)
     assert torch.count_nonzero(rendered["direct_hdr"]) == 0
     assert torch.count_nonzero(rendered["indirect_hdr"]) == 0
-    assert torch.allclose(rendered["hdr"], expected_radiance, atol=1.0e-6)
+    assert torch.allclose(rendered["hdr"], expected_directional, atol=1.0e-6)
 
 
 def test_camera_emitter_behind_gaussian_surface_is_occluded() -> None:
