@@ -287,6 +287,23 @@ falloff_power  = [1]
 보정 상수를 곱한다. test condition마다 GT 이미지를 보고 별도 보정하면 oracle
 relighting 수치와 이미지 기반 light fitting 수치가 섞이므로 금지한다.
 
+캡처가 끝난 뒤 다음 명령은 enabled mesh만 골라 AEGIR model 좌표로 변환하고,
+JSON과 바로 로드할 수 있는 tensor state를 데이터셋 폴더에 저장한다. radiance
+보정은 새 test 이미지가 아니라 기존 학습 checkpoint의 초기 emitter radiance를
+사용한다.
+
+```bash
+/workspace/.conda/envs/dnsplatter/bin/python \
+  scripts/convert_blender_emitters_to_aegir.py \
+  --dataset /workspace/hohyun_ws/datasets/aegir_nerfstudio/blender_my_room_relight_new_ellipse_test \
+  --dnsplatter-checkpoint /path/to/2dgs/nerfstudio_models/step-000020000.pt \
+  --aegir-checkpoint /path/to/aegir_20k.pt
+```
+
+생성 파일은 `aegir_emitter_override.json`과 `aegir_emitter_override.pt`다.
+JSON에는 중심, 두 반지름, `wxyz` quaternion, local 축, radiance, six-axis gain,
+spread와 falloff가 기록된다.
+
 현재 저장소에는 기존 checkpoint의 emitter 일부를 선택하는 기능은 있지만,
 새 `emitters.json`을 runtime emitter로 교체하는 CLI는 아직 없다. 다음 구현은
 `inspect --emitter-json ... --replace-checkpoint-emitters` 형태로 추가하며,
