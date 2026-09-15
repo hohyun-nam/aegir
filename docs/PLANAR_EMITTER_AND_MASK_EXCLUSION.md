@@ -102,14 +102,12 @@ geometry and does not solve the duplicate emitter artifact.
 
 ## Checkpoint compatibility
 
-New checkpoints use format v14 and store two emitter scales plus the directional
-parameters. V1-v12 ellipsoid checkpoints remain loadable for inference and
-inspection: their two largest axes become ellipse tangents, the smallest axis
-becomes the plane normal, and their angular field is reordered into that local
-frame. V13 one-sided planar checkpoints receive an initially neutral full-sphere
-field while preserving their front radiance. Because optimizer tensors and
-semantics changed, v1-v13 cannot be exactly resumed. Migration also cannot
-remove emitter Gaussians already learned
+New checkpoints use format v15 and record selectable planar-ellipse or 3D-ellipsoid
+support together with the directional parameters. V14 planar checkpoints remain
+exactly resumable. V1-v12 ellipsoid checkpoints remain loadable through their
+historical planar migration path, and V13 one-sided planar checkpoints receive an
+initially neutral full-sphere field while preserving their front radiance. V1-v13
+cannot be exactly resumed. Migration also cannot remove emitter Gaussians already learned
 inside an old scene checkpoint; retrain native 2DGS with the exclusion masks
 for that part.
 

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor, nn
 
-from .math_utils import quat_to_matrix, safe_normalize
+from .math_utils import quat_to_matrix, safe_normalize, uniform_sample_sphere
 
 
 @dataclass(slots=True)
@@ -21,14 +21,13 @@ class EmitterState:
 
 
 class AreaEmitterModel(nn.Module):
-    """Bounded planar ellipses with learned directional emission.
+    """Bounded planar ellipses or ellipsoids with learned directional emission.
 
-    Each emitter is one planar ellipse. ``scales`` stores its two semi-axis
-    lengths. Its local frame parameterizes a learned angular spread, falloff,
-    and six independent signed-axis gains over the full sphere.
+    ``scales`` stores two semi-axis lengths for a planar ellipse or three for
+    the restored pre-v13 ellipsoid support. The local frame parameterizes a
+    learned angular spread, falloff, and six independent signed-axis gains over
+    the full sphere.
     """
-
-    representation = "planar_ellipse_2d"
 
     def __init__(
         self,
@@ -51,8 +50,8 @@ class AreaEmitterModel(nn.Module):
         if centers.ndim != 2 or centers.shape[-1] != 3:
             raise ValueError("centers must have shape [num_emitters, 3]")
         n = centers.shape[0]
-        if scales.shape != (n, 2):
-            raise ValueError("planar emitter scales must have shape [num_emitters, 2]")
+        if scales.shape not in {(n, 2), (n, 3)}:
+            raise ValueError("emitter scales must have shape [num_emitters, 2 or 3]")
         device, dtype = centers.device, centers.dtype
         if quaternions is None:
             quaternions = torch.zeros((n, 4), device=device, dtype=dtype)
@@ -94,6 +93,10 @@ class AreaEmitterModel(nn.Module):
     @property
     def num_emitters(self) -> int:
         return int(self.centers.shape[0])
+
+    @property
+    def representation(self) -> str:
+        return "planar_ellipse_2d" if self.log_scales.shape[-1] == 2 else "ellipsoid_3d"
 
     @property
     def rotations(self) -> Tensor:
@@ -305,10 +308,33 @@ class AreaEmitterModel(nn.Module):
     def sample_surface(
         self, points: Tensor, samples_per_emitter: int, generator=None
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """Uniformly sample each bounded ellipse in area measure."""
+        """Sample each bounded ellipse or legacy ellipsoid surface."""
 
         flat = points.reshape(-1, 3)
         e = self.num_emitters
+        if self.representation == "ellipsoid_3d":
+            unit = uniform_sample_sphere(
+                (flat.shape[0], e, samples_per_emitter),
+                device=flat.device,
+                dtype=flat.dtype,
+                generator=generator,
+            )
+            local = unit * self.scales[None, :, None, :]
+            offsets = torch.einsum("besj,eij->besi", local, self.rotations)
+            q = self.centers[None, :, None, :] + offsets
+            delta = q - flat[:, None, None, :]
+            dist = delta.norm(dim=-1, keepdim=True).clamp_min(1.0e-6)
+            dirs = delta / dist
+            ids = torch.arange(e, device=flat.device).view(1, e, 1).expand(
+                flat.shape[0], e, samples_per_emitter
+            )
+            out_shape = points.shape[:-1] + (e * samples_per_emitter,)
+            return (
+                q.reshape(out_shape + (3,)),
+                dirs.reshape(out_shape + (3,)),
+                dist.reshape(out_shape + (1,)),
+                ids.reshape(out_shape),
+            )
         disk = self._sample_unit_disk(
             (flat.shape[0], e, samples_per_emitter), flat.device, flat.dtype, generator
         )
@@ -343,6 +369,26 @@ class AreaEmitterModel(nn.Module):
         e = self.num_emitters
         offsets = torch.randint(e, (flat.shape[0], 1), device=flat.device, generator=generator)
         ids = (torch.arange(num_samples, device=flat.device)[None] + offsets) % e
+        if self.representation == "ellipsoid_3d":
+            unit = uniform_sample_sphere(
+                (flat.shape[0], num_samples),
+                device=flat.device,
+                dtype=flat.dtype,
+                generator=generator,
+            )
+            local = unit * self.scales[ids]
+            world_offsets = torch.einsum("bsj,bsij->bsi", local, self.rotations[ids])
+            q = self.centers[ids] + world_offsets
+            delta = q - flat[:, None, :]
+            dist = delta.norm(dim=-1, keepdim=True).clamp_min(1.0e-6)
+            dirs = delta / dist
+            out_shape = points.shape[:-1] + (num_samples,)
+            return (
+                q.reshape(out_shape + (3,)),
+                dirs.reshape(out_shape + (3,)),
+                dist.reshape(out_shape + (1,)),
+                ids.reshape(out_shape),
+            )
         disk = self._sample_unit_disk(
             (flat.shape[0], num_samples), flat.device, flat.dtype, generator
         )
@@ -363,6 +409,10 @@ class AreaEmitterModel(nn.Module):
         )
 
     def effective_area(self) -> Tensor:
+        if self.representation == "ellipsoid_3d":
+            # Historical AEGIR surrogate used before planar emitters. It is
+            # intentionally retained for a controlled representation ablation.
+            return 4.0 * torch.pi * self.scales.prod(dim=-1).pow(2.0 / 3.0)
         return torch.pi * self.scales.prod(dim=-1)
 
     def light_pdf_surrogate(
@@ -371,9 +421,11 @@ class AreaEmitterModel(nn.Module):
         emitter_ids: Tensor,
         directions_to_light: Tensor | None = None,
     ) -> Tensor:
-        """Return ellipse area density converted to directional density."""
+        """Return the selected support's area-to-direction PDF surrogate."""
 
         areas = self.effective_area()[emitter_ids].unsqueeze(-1)
+        if self.representation == "ellipsoid_3d":
+            return distances.square() / (self.num_emitters * areas + 1.0e-6)
         if directions_to_light is None:
             projected_cosine = torch.ones_like(distances)
         else:
@@ -389,13 +441,34 @@ class AreaEmitterModel(nn.Module):
         )
 
     def intersect(self, ray_o: Tensor, ray_d: Tensor) -> tuple[Tensor, Tensor, Tensor]:
-        """Intersect rays with either side of every bounded planar ellipse."""
+        """Intersect rays with every bounded planar ellipse or ellipsoid."""
 
         o = ray_o.reshape(-1, 3)
         d = safe_normalize(ray_d.reshape(-1, 3), dim=-1)
         rel = o[:, None, :] - self.centers[None, :, :]
         o_l = torch.einsum("bei,eij->bej", rel, self.rotations)
         d_l = torch.einsum("bi,eij->bej", d, self.rotations)
+        if self.representation == "ellipsoid_3d":
+            o_l = o_l / self.scales[None]
+            d_l = d_l / self.scales[None]
+            a = (d_l * d_l).sum(-1)
+            b = 2.0 * (o_l * d_l).sum(-1)
+            c = (o_l * o_l).sum(-1) - 1.0
+            discriminant = b.square() - 4.0 * a * c
+            valid = discriminant > 0.0
+            root = discriminant.clamp_min(0.0).sqrt()
+            denominator = 2.0 * a.clamp_min(1.0e-8)
+            t0 = (-b - root) / denominator
+            t1 = (-b + root) / denominator
+            t = torch.where(t0 > 1.0e-5, t0, t1)
+            t = torch.where(valid & (t > 1.0e-5), t, torch.full_like(t, torch.inf))
+            min_t, idx = t.min(dim=-1)
+            hit = torch.isfinite(min_t)
+            return (
+                hit.reshape(ray_d.shape[:-1]),
+                min_t.reshape(ray_d.shape[:-1] + (1,)),
+                idx.reshape(ray_d.shape[:-1]),
+            )
         denom = d_l[..., 2]
         t = -o_l[..., 2] / torch.where(
             denom.abs() > 1.0e-8, denom, torch.ones_like(denom)

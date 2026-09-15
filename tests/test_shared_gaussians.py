@@ -379,6 +379,44 @@ def test_blender_bbox_fits_exactly_one_planar_ellipse() -> None:
     assert float(emitter.normals[0, 2].detach()) < -0.999
 
 
+def test_planar_mask_seed_can_restore_pre_v13_ellipsoid_thickness() -> None:
+    planar = AreaEmitterModel(
+        centers=torch.zeros((1, 3)),
+        scales=torch.tensor([[0.30, 0.15]]),
+    )
+    corners = torch.tensor(
+        [
+            [x, y, z]
+            for x in (-0.30, 0.30)
+            for y in (-0.15, 0.15)
+            for z in (-0.0125, 0.0125)
+        ]
+    )
+    restored = initialization.restore_ellipsoid_support(
+        planar,
+        [{"model_bbox_corners": corners}],
+        scene_scale=1.0,
+        min_scale_fraction=0.002,
+    )
+
+    assert restored.representation == "ellipsoid_3d"
+    torch.testing.assert_close(restored.scales, torch.tensor([[0.30, 0.15, 0.0125]]))
+    hit, distance, _ = restored.intersect(
+        torch.tensor([[0.0, 0.0, 1.0]]),
+        torch.tensor([[0.0, 0.0, -1.0]]),
+    )
+    assert hit.item()
+    assert distance.item() == pytest.approx(0.9875, abs=1.0e-5)
+
+    points = torch.tensor([[0.0, 0.0, -1.0], [0.5, 0.0, 0.0]])
+    q, directions, distances, ids = restored.sample_surface_total(
+        points, 128, generator=torch.Generator().manual_seed(3)
+    )
+    assert q.shape == directions.shape == (2, 128, 3)
+    assert distances.shape == (2, 128, 1)
+    assert ids.shape == (2, 128)
+
+
 def test_total_light_sampling_is_exact_and_balanced() -> None:
     emitters = AreaEmitterModel(torch.zeros((9, 3)), torch.ones((9, 2)))
     points = torch.zeros((2, 3))

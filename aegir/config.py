@@ -30,10 +30,10 @@ class RenderConfig:
     trace_origin_offset: float = 0.05
     tonemap_exposure: float = 1.0
     point_visibility: bool = True
-    # Composite learned emitter self-emission when a planar ellipse is hit
+    # Composite learned emitter self-emission when analytic support is hit
     # before the camera-visible Gaussian surface.
     camera_visible_emitters: bool = True
-    # Blend learned local +X/-X/+Y/-Y/+Z/-Z gains into the planar emitter's
+    # Blend learned local +X/-X/+Y/-Y/+Z/-Z gains into the emitter's
     # full-sphere directional radiance. Disable only for the symmetric ablation.
     six_axis_emission: bool = True
     emitter_axis_lobe_sharpness: float = 12.0
@@ -94,6 +94,10 @@ class TrainingConfig:
     material_lr: float = 1.0e-3
     emitter_lr: float = 1.0e-3
     emitter_final_lr: float = 1.0e-4
+    # Keep planar emitters as the compatibility default. The ellipsoid option
+    # restores the pre-v13 three-axis analytic emitter without changing the
+    # underlying 2D Gaussian scene representation.
+    emitter_representation: str = "planar_ellipse_2d"
     # Keep the initialized light proxy attached to the detected fixture. Scale
     # may shrink, but cannot grow beyond its initialized extent by default.
     optimize_emitter_centers: bool = False

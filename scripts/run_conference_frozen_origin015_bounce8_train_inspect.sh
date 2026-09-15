@@ -35,6 +35,7 @@ CONSTRAIN_EMITTER_SCALES="${CONSTRAIN_EMITTER_SCALES:-1}"
 EMITTER_SCALE_MIN_RATIO="${EMITTER_SCALE_MIN_RATIO:-0.1}"
 EMITTER_SCALE_MAX_RATIO="${EMITTER_SCALE_MAX_RATIO:-1.0}"
 EMITTER_ADAPTATION="${EMITTER_ADAPTATION:-0}"
+EMITTER_REPRESENTATION="${EMITTER_REPRESENTATION:-planar_ellipse_2d}"
 CHECKPOINT="$OUTPUT_ROOT/aegir_20k.pt"
 INSPECT_ROOT="$OUTPUT_ROOT/inspect_compare30"
 LOG="$OUTPUT_ROOT/train_inspect.log"
@@ -76,6 +77,10 @@ if [[ "$SIX_AXIS_EMISSION" != "0" && "$SIX_AXIS_EMISSION" != "1" ]]; then
   echo "SIX_AXIS_EMISSION must be 0 or 1" >&2
   exit 1
 fi
+if [[ "$EMITTER_REPRESENTATION" != "planar_ellipse_2d" && "$EMITTER_REPRESENTATION" != "ellipsoid_3d" ]]; then
+  echo "EMITTER_REPRESENTATION must be planar_ellipse_2d or ellipsoid_3d" >&2
+  exit 1
+fi
 for flag in OPTIMIZE_EMITTER_CENTERS OPTIMIZE_EMITTER_ROTATIONS OPTIMIZE_EMITTER_SCALES CONSTRAIN_EMITTER_SCALES EMITTER_ADAPTATION; do
   if [[ "${!flag}" != "0" && "${!flag}" != "1" ]]; then
     echo "$flag must be 0 or 1" >&2
@@ -101,6 +106,7 @@ export SIX_AXIS_EMISSION EMITTER_AXIS_LOBE_SHARPNESS
 export OPTIMIZE_EMITTER_CENTERS OPTIMIZE_EMITTER_ROTATIONS OPTIMIZE_EMITTER_SCALES
 export CONSTRAIN_EMITTER_SCALES EMITTER_SCALE_MIN_RATIO EMITTER_SCALE_MAX_RATIO
 export EMITTER_ADAPTATION
+export EMITTER_REPRESENTATION
 
 mkdir -p "$OUTPUT_ROOT" "$CUDA_STUBS" "$TORCH_EXTENSIONS_DIR"
 exec > >(tee -a "$LOG") 2>&1
@@ -110,7 +116,7 @@ echo "$(date --iso-8601=seconds) conference geometry-configurable AEGIR"
 echo "geometry: $GEOMETRY"
 echo "checkpoint: $CHECKPOINT"
 echo "geometry_lr=$GEOMETRY_LR scene_culling=$SCENE_CULLING raster_size=$RASTER_SIZE origin_offset=0.15 bounce_samples=$BOUNCE_SAMPLES bounce_chunk_size=$BOUNCE_CHUNK_SIZE albedo_initialization=$ALBEDO_INITIALIZATION neutral_albedo=$NEUTRAL_ALBEDO albedo_lr=$ALBEDO_LR six_axis_emission=$SIX_AXIS_EMISSION axis_lobe_sharpness=$EMITTER_AXIS_LOBE_SHARPNESS"
-echo "emitter_centers_trainable=$OPTIMIZE_EMITTER_CENTERS emitter_rotations_trainable=$OPTIMIZE_EMITTER_ROTATIONS emitter_scales_trainable=$OPTIMIZE_EMITTER_SCALES emitter_scale_constraint=$CONSTRAIN_EMITTER_SCALES scale_ratio=[$EMITTER_SCALE_MIN_RATIO,$EMITTER_SCALE_MAX_RATIO] emitter_adaptation=$EMITTER_ADAPTATION"
+echo "emitter_representation=$EMITTER_REPRESENTATION emitter_centers_trainable=$OPTIMIZE_EMITTER_CENTERS emitter_rotations_trainable=$OPTIMIZE_EMITTER_ROTATIONS emitter_scales_trainable=$OPTIMIZE_EMITTER_SCALES emitter_scale_constraint=$CONSTRAIN_EMITTER_SCALES scale_ratio=[$EMITTER_SCALE_MIN_RATIO,$EMITTER_SCALE_MAX_RATIO] emitter_adaptation=$EMITTER_ADAPTATION"
 echo "training_transport_mode=$TRAINING_TRANSPORT_MODE sh_fade=[$SH_FADE_START,$SH_FADE_END] material_freeze=15000 light_white_target=$LIGHT_WHITE light_white_ramp_end=$LIGHT_WHITE_RAMP_END"
 
 if [[ ! -s "$CHECKPOINT" ]]; then
@@ -150,6 +156,7 @@ config.training.albedo_initialization = os.environ["ALBEDO_INITIALIZATION"]
 config.training.neutral_albedo = float(os.environ["NEUTRAL_ALBEDO"])
 config.training.emitter_lr = 1.0e-3
 config.training.emitter_final_lr = 1.0e-4
+config.training.emitter_representation = os.environ["EMITTER_REPRESENTATION"]
 config.training.optimize_emitter_centers = os.environ["OPTIMIZE_EMITTER_CENTERS"] == "1"
 config.training.optimize_emitter_rotations = os.environ["OPTIMIZE_EMITTER_ROTATIONS"] == "1"
 config.training.optimize_emitter_scales = os.environ["OPTIMIZE_EMITTER_SCALES"] == "1"
@@ -199,12 +206,30 @@ payload = torch.load(sys.argv[1], map_location="cpu", weights_only=False)
 print(payload.get("format", "unknown"))
 PY
   )
-  if [[ "$checkpoint_format" != "aegir_shared_gaussian_v14" ]]; then
-    echo "refusing to reuse $CHECKPOINT ($checkpoint_format) for directional planar training" >&2
-    echo "choose a new OUTPUT_ROOT; v1-v13 remain available for inspection only" >&2
+  if [[ "$checkpoint_format" != "aegir_shared_gaussian_v14" && "$checkpoint_format" != "aegir_shared_gaussian_v15" ]]; then
+    echo "refusing to reuse $CHECKPOINT ($checkpoint_format) for current directional training" >&2
+    echo "choose a new OUTPUT_ROOT" >&2
     exit 2
   fi
-  echo "Reusing completed directional checkpoint: $CHECKPOINT"
+  if [[ "$checkpoint_format" == "aegir_shared_gaussian_v14" ]]; then
+    checkpoint_representation=planar_ellipse_2d
+  else
+    checkpoint_representation=$(
+      "$PYTHON" - "$CHECKPOINT" <<'PY'
+import sys
+
+import torch
+
+payload = torch.load(sys.argv[1], map_location="cpu", weights_only=False)
+print(payload["config"]["training"].get("emitter_representation", "planar_ellipse_2d"))
+PY
+    )
+  fi
+  if [[ "$checkpoint_representation" != "$EMITTER_REPRESENTATION" ]]; then
+    echo "refusing to reuse $CHECKPOINT with emitter representation $checkpoint_representation" >&2
+    exit 2
+  fi
+  echo "Reusing completed directional $checkpoint_representation checkpoint: $CHECKPOINT"
 fi
 
 echo "Training complete; starting 30-pose inspection with $INSPECT_BOUNCE_SAMPLES secondary samples and PLY export"

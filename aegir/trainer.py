@@ -24,7 +24,11 @@ from .config import AEGIRConfig, LossWeights, config_from_dict
 from .data import MultiViewSceneDataset
 from .emitters import AreaEmitterModel
 from .gaussian_scene import GaussianMaterialBackend
-from .initialization import seed_emitters_from_gbuffer_views, seed_planar_emitters_from_masks
+from .initialization import (
+    restore_ellipsoid_support,
+    seed_emitters_from_gbuffer_views,
+    seed_planar_emitters_from_masks,
+)
 from .irgs_tracer import IRGSVisibilityTracer
 from .losses import (
     edge_aware_tv,
@@ -180,6 +184,21 @@ def initialize_emitters(
     config: AEGIRConfig,
     device: str,
 ) -> AreaEmitterModel:
+    representation = config.training.emitter_representation
+    if representation not in {"planar_ellipse_2d", "ellipsoid_3d"}:
+        raise ValueError(f"unsupported emitter representation {representation!r}")
+
+    def apply_representation(value: AreaEmitterModel) -> AreaEmitterModel:
+        if representation == "planar_ellipse_2d":
+            return value
+        scene_scale = (bounds[1] - bounds[0]).norm()
+        return restore_ellipsoid_support(
+            value,
+            dataset.emitter_definitions,
+            scene_scale,
+            config.training.emitter_min_scale_fraction,
+        )
+
     masked_emitters = seed_planar_emitters_from_masks(
         dataset.frames,
         (bounds[0].cpu(), bounds[1].cpu()),
@@ -188,7 +207,7 @@ def initialize_emitters(
         max_emitters=config.adaptive.max_emitters,
     )
     if masked_emitters is not None:
-        return masked_emitters.to(device)
+        return apply_representation(masked_emitters).to(device)
 
     targets: list[Tensor] = []
     gbuffers: list[dict[str, Tensor]] = []
@@ -229,8 +248,8 @@ def initialize_emitters(
         persistence_min_views=config.training.emitter_persistence_min_views,
         persistence_min_fraction=config.training.emitter_persistence_min_fraction,
         persistence_voxel_fraction=config.training.emitter_persistence_voxel_fraction,
-    ).to(device)
-    return emitters
+    )
+    return apply_representation(emitters).to(device)
 
 
 class SharedGaussianTrainer:

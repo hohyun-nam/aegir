@@ -361,7 +361,11 @@ def inspect_checkpoint(
     initial_emitter_state = payload.get("initial_emitter_state")
     if initial_emitter_state is not None:
         initial_emitter_state = emitter_state_dict(
-            emitters_from_state(initial_emitter_state, "cpu")
+            emitters_from_state(
+                initial_emitter_state,
+                "cpu",
+                preserve_3d=payload.get("format") == "aegir_shared_gaussian_v15",
+            )
         )
         index = torch.tensor(active_emitter_indices, dtype=torch.long)
         initial_emitter_state = {
@@ -412,7 +416,13 @@ def inspect_emitter_evolution(
         initial_emitters.sanitize_parameters(bounds)
         initial_state = emitter_state_dict(initial_emitters)
     else:
-        initial_state = emitter_state_dict(emitters_from_state(initial_state, "cpu"))
+        initial_state = emitter_state_dict(
+            emitters_from_state(
+                initial_state,
+                "cpu",
+                preserve_3d=payload.get("format") == "aegir_shared_gaussian_v15",
+            )
+        )
     output_dir = Path(output_dir)
     create_emitter_evolution_outputs(
         initial_state,

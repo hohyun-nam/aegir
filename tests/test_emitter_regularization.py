@@ -134,6 +134,7 @@ def test_cli_requires_explicit_override_for_non_paper_regularizers() -> None:
     assert defaults.training_transport_mode == "hybrid"
     assert defaults.light_white == pytest.approx(0.0)
     assert defaults.light_white_ramp_end == 0
+    assert defaults.emitter_representation == "planar_ellipse_2d"
 
     overridden = parser.parse_args(
         required
@@ -146,12 +147,15 @@ def test_cli_requires_explicit_override_for_non_paper_regularizers() -> None:
             "secondary_only",
             "--light-white-ramp-end",
             "15000",
+            "--emitter-representation",
+            "ellipsoid_3d",
         ]
     )
     assert overridden.light_surface == 10.0
     assert overridden.light_view == 1.0
     assert overridden.training_transport_mode == "secondary_only"
     assert overridden.light_white_ramp_end == 15_000
+    assert overridden.emitter_representation == "ellipsoid_3d"
 
 
 def test_emitter_subset_preserves_selected_physical_parameters() -> None:

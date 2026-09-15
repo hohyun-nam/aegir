@@ -94,7 +94,13 @@ def main() -> None:
     else:
         emitter_state = payload["emitter_state"]
         scene = scene_from_checkpoint(payload)
-    emitter_state = emitter_state_dict(emitters_from_state(emitter_state, "cpu"))
+    emitter_state = emitter_state_dict(
+        emitters_from_state(
+            emitter_state,
+            "cpu",
+            preserve_3d=payload.get("format") == "aegir_shared_gaussian_v15",
+        )
+    )
     before = scene["means"].shape[0]
     scene = filter_gaussians(
         scene,

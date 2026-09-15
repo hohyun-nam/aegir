@@ -14,7 +14,7 @@ from .emitters import AreaEmitterModel
 from .gaussian_scene import GaussianMaterialBackend, planarize_gaussians
 from .math_utils import matrix_to_quat, quat_to_matrix
 
-CHECKPOINT_FORMAT = "aegir_shared_gaussian_v14"
+CHECKPOINT_FORMAT = "aegir_shared_gaussian_v15"
 SUPPORTED_CHECKPOINT_FORMATS = {
     "aegir_shared_gaussian_v1",
     "aegir_shared_gaussian_v2",
@@ -29,9 +29,10 @@ SUPPORTED_CHECKPOINT_FORMATS = {
     "aegir_shared_gaussian_v11",
     "aegir_shared_gaussian_v12",
     "aegir_shared_gaussian_v13",
+    "aegir_shared_gaussian_v14",
     CHECKPOINT_FORMAT,
 }
-EXACT_RESUME_FORMATS = {CHECKPOINT_FORMAT}
+EXACT_RESUME_FORMATS = {"aegir_shared_gaussian_v14", CHECKPOINT_FORMAT}
 
 
 def emitter_state_dict(emitters: AreaEmitterModel) -> dict[str, torch.Tensor]:
@@ -105,7 +106,7 @@ def require_exact_resume_state(payload: dict[str, Any], path: str | Path | None 
     if payload.get("format") not in EXACT_RESUME_FORMATS or "training_state" not in payload:
         raise ValueError(
             f"checkpoint{location} has no exact-resume optimizer/RNG state; "
-            "only v14 directional-planar-emitter checkpoints are exactly resumable; "
+            "only v14-v15 directional-emitter checkpoints are exactly resumable; "
             "v1-v13 are inference-only or explicit warm starts"
         )
     training_state = payload["training_state"]
@@ -121,7 +122,7 @@ def require_exact_resume_state(payload: dict[str, Any], path: str | Path | None 
     missing = sorted(required.difference(training_state))
     if missing:
         raise ValueError(f"checkpoint{location} is missing exact-resume fields: {missing}")
-    if payload.get("format") == CHECKPOINT_FORMAT:
+    if payload.get("format") in EXACT_RESUME_FORMATS:
         emitter_optimization = training_state.get("emitter_optimization")
         if emitter_optimization is None or "scale_anchors" not in emitter_optimization:
             raise ValueError(
@@ -146,7 +147,9 @@ def require_exact_resume_state(payload: dict[str, Any], path: str | Path | None 
     return training_state
 
 
-def _legacy_planar_emitter_state(payload: dict[str, Any]) -> dict[str, torch.Tensor]:
+def _legacy_planar_emitter_state(
+    payload: dict[str, Any], *, preserve_3d: bool = False
+) -> dict[str, torch.Tensor]:
     """Convert legacy support to a plane while retaining directional emission."""
 
     scales = payload["scales"]
@@ -177,6 +180,25 @@ def _legacy_planar_emitter_state(payload: dict[str, Any]) -> dict[str, torch.Ten
         }
     if scales.shape[-1] != 3:
         raise ValueError(f"unsupported emitter scale shape {tuple(scales.shape)}")
+
+    if preserve_3d:
+        count = scales.shape[0]
+        dtype, device = scales.dtype, scales.device
+        return {
+            "centers": payload["centers"],
+            "quaternions": payload["quaternions"],
+            "scales": scales,
+            "colors": payload["colors"],
+            "axis_gains": payload.get(
+                "axis_gains", torch.ones((count, 6), dtype=dtype, device=device)
+            ),
+            "spreads": payload.get(
+                "spreads", torch.ones((count, 3), dtype=dtype, device=device)
+            ),
+            "falloff_powers": payload.get(
+                "falloff_powers", torch.ones((count, 1), dtype=dtype, device=device)
+            ),
+        }
 
     rotations = quat_to_matrix(payload["quaternions"].float())
     order = scales.argsort(dim=-1, descending=True)
@@ -213,8 +235,10 @@ def _legacy_planar_emitter_state(payload: dict[str, Any]) -> dict[str, torch.Ten
     }
 
 
-def emitters_from_state(payload: dict[str, Any], device: str) -> AreaEmitterModel:
-    planar = _legacy_planar_emitter_state(payload)
+def emitters_from_state(
+    payload: dict[str, Any], device: str, *, preserve_3d: bool = False
+) -> AreaEmitterModel:
+    planar = _legacy_planar_emitter_state(payload, preserve_3d=preserve_3d)
     return AreaEmitterModel(
         centers=planar["centers"].to(device),
         scales=planar["scales"].to(device),
@@ -313,8 +337,12 @@ def load_checkpoint(
     scene = GaussianMaterialBackend.from_state(payload["source_dnsplatter_checkpoint"], scene_state).to(
         device
     )
-    emitters = emitters_from_state(payload["emitter_state"], device)
-    if payload.get("format") == CHECKPOINT_FORMAT and "emitter_raw_state" in payload:
+    emitters = emitters_from_state(
+        payload["emitter_state"],
+        device,
+        preserve_3d=payload.get("format") == CHECKPOINT_FORMAT,
+    )
+    if payload.get("format") in EXACT_RESUME_FORMATS and "emitter_raw_state" in payload:
         raw_state = dict(payload["emitter_raw_state"])
         emitters.load_state_dict(raw_state, strict=True)
     return scene, emitters, payload

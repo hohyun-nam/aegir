@@ -183,6 +183,68 @@ def seed_planar_emitters_from_masks(
     )
 
 
+def restore_ellipsoid_support(
+    emitters: AreaEmitterModel,
+    emitter_definitions: list[dict] | None,
+    scene_scale: float | Tensor,
+    min_scale_fraction: float,
+) -> AreaEmitterModel:
+    """Restore the pre-planar third emitter scale while retaining mask fitting.
+
+    The two tangent scales, centers, rotations, radiance, and directional state
+    come from the current robust planar initializer.  Blender bounding-box
+    thickness initializes the normal scale.  A compound definition can provide
+    one shared physical thickness for several disconnected mask components.
+    """
+
+    if emitters.scales.shape[-1] == 3:
+        return emitters
+    if emitters.scales.shape[-1] != 2:
+        raise ValueError("ellipsoid restoration expects two planar emitter scales")
+    state = emitters.state()
+    floor = max(float(torch.as_tensor(scene_scale)) * float(min_scale_fraction), 1.0e-4)
+    normals = quat_to_matrix(state.quaternions)[..., :, 2]
+    definition_thicknesses: list[Tensor] = []
+    if emitter_definitions:
+        for definition in emitter_definitions:
+            corners = definition.get("model_bbox_corners")
+            if corners is None:
+                continue
+            points = torch.as_tensor(corners, device=state.scales.device, dtype=state.scales.dtype)
+            if points.ndim != 2 or points.shape[-1] != 3:
+                continue
+            definition_thicknesses.append(points)
+
+    normal_scales = []
+    for index, normal in enumerate(normals):
+        if len(definition_thicknesses) == emitters.num_emitters:
+            candidates = [definition_thicknesses[index]]
+        else:
+            candidates = definition_thicknesses
+        projected = []
+        for corners in candidates:
+            centered = corners - corners.mean(dim=0)
+            projected.append((centered @ normal).abs().amax())
+        thickness = torch.stack(projected).median() if projected else normal.new_tensor(floor)
+        normal_scales.append(thickness.clamp_min(floor))
+
+    return AreaEmitterModel(
+        centers=state.centers,
+        scales=torch.cat((state.scales, torch.stack(normal_scales)[:, None]), dim=-1),
+        colors=state.colors,
+        quaternions=state.quaternions,
+        axis_gains=state.axis_gains,
+        spreads=state.spreads,
+        falloff_powers=state.falloff_powers,
+        min_scale=emitters.min_scale,
+        min_spread=emitters.min_spread,
+        max_scale=emitters.max_scale,
+        max_color=emitters.max_color,
+        max_spread=emitters.max_spread,
+        max_falloff_power=emitters.max_falloff_power,
+    )
+
+
 def _seed_disconnected_mask_components(
     records: list[tuple[Tensor, Tensor, Tensor, Tensor]],
     scene_scale: Tensor,

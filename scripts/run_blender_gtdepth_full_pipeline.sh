@@ -202,7 +202,10 @@ from pathlib import Path
 import torch
 
 checkpoint = torch.load("$AEGIR_OUTPUT/aegir_20k.pt", map_location="cpu", weights_only=False)
-assert checkpoint["format"] == "aegir_shared_gaussian_v14"
+assert checkpoint["format"] in {"aegir_shared_gaussian_v14", "aegir_shared_gaussian_v15"}
+assert checkpoint["config"]["training"].get(
+    "emitter_representation", "planar_ellipse_2d"
+) == "planar_ellipse_2d"
 assert checkpoint["config"]["training"]["training_transport_mode"] == "secondary_only"
 assert checkpoint["config"]["render"]["num_bounce_samples"] == 1
 metrics_path = Path("$AEGIR_OUTPUT/inspect_compare30/inspect_secondary_bounce/metrics.json")

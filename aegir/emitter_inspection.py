@@ -100,7 +100,11 @@ def _emitter_record(state: dict[str, Tensor], index: int) -> dict[str, Any]:
         # Retained for consumers of v13 inspection JSON. Directional v14
         # emitters use this as a frame axis rather than a one-sided normal.
         "emitting_normal": local_z,
-        "area": float(math.pi * scales.prod()),
+        "area": float(
+            math.pi * scales.prod()
+            if scales.numel() == 2
+            else 4.0 * math.pi * scales.prod().pow(2.0 / 3.0)
+        ),
     }
     if "axis_gains" in state:
         record["axis_gain_order"] = ["+X", "-X", "+Y", "-Y", "+Z", "-Z"]
@@ -146,8 +150,8 @@ def _planar_covariance(state: dict[str, Tensor], index: int) -> Tensor:
     quaternion = safe_normalize(state["quaternions"][index : index + 1], dim=-1)
     rotation = quat_to_matrix(quaternion)[0]
     scales = state["scales"][index].clamp_min(1.0e-8)
-    tangents = rotation[:, :2]
-    return tangents @ torch.diag(scales.square()) @ tangents.T
+    axes = rotation[:, : scales.numel()]
+    return axes @ torch.diag(scales.square()) @ axes.T
 
 
 def _ellipse_outline(center: Tensor, covariance: Tensor, samples: int = 96) -> Tensor:

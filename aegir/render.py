@@ -142,7 +142,7 @@ class DeferredRenderer:
     ) -> tuple[Tensor, Tensor]:
         """Return self-emission for the nearest camera-visible emitter.
 
-        The Gaussian G-buffer and learned planar emitters are two competing
+        The Gaussian G-buffer and learned analytic emitters are two competing
         scene layers.  An emitter contributes only when its first positive ray
         intersection is closer than the expected Gaussian surface.  Invalid
         Gaussian pixels carry an infinite surface distance, allowing an

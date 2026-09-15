@@ -63,6 +63,12 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--emitter-lr", type=float, default=1.0e-3)
     train.add_argument("--emitter-final-lr", type=float, default=1.0e-4)
     train.add_argument(
+        "--emitter-representation",
+        choices=("planar_ellipse_2d", "ellipsoid_3d"),
+        default="planar_ellipse_2d",
+        help="analytic emitter support used for training; the Gaussian scene remains 2DGS",
+    )
+    train.add_argument(
         "--optimize-emitter-centers",
         action="store_true",
         help="optimize emitter centers instead of fixing their initialized positions",
@@ -312,6 +318,7 @@ def main() -> None:
         config.training.neutral_albedo = args.neutral_albedo
         config.training.emitter_lr = args.emitter_lr
         config.training.emitter_final_lr = args.emitter_final_lr
+        config.training.emitter_representation = args.emitter_representation
         config.training.optimize_emitter_centers = args.optimize_emitter_centers
         config.training.optimize_emitter_rotations = args.optimize_emitter_rotations
         config.training.optimize_emitter_scales = not args.freeze_emitter_scales

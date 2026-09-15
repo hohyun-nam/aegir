@@ -107,6 +107,25 @@ The Conference wrapper exposes these settings as `ALBEDO_LR`,
 
 ## Chronological changes
 
+### 2026-09-15 — Selectable pre-planar 3D ellipsoid emitter ablation
+
+- Added `--emitter-representation ellipsoid_3d` while retaining
+  `planar_ellipse_2d` as the compatibility default. This changes only the
+  analytic light support; the shared scene remains the selected native 2DGS
+  checkpoint with emitter-excluded geometry.
+- The 3D option keeps the current robust multi-view mask fit for emitter
+  center, tangent scales, orientation, HDR color and directional parameters,
+  then restores a third normal scale from the Blender emitter bounding-box
+  thickness. A compound six-panel mesh supplies the same physical thickness
+  to its six disconnected mask components.
+- Restored the pre-planar ellipsoid surface sampler, effective-area surrogate
+  and analytic ray intersection for this controlled comparison. Center and
+  rotation remain fixed, scale constraints and split/prune defaults remain
+  unchanged, and RGB/six-axis gains/spread/falloff remain trainable.
+- Added checkpoint v15 so exact resume records whether training used planar or
+  ellipsoid support. V14 planar checkpoints remain exactly resumable and all
+  prior checkpoints remain inspectable.
+
 ### 2026-09-14 — Invalid-mask opacity supervision for native 2DGS
 
 - The first binary-mask implementation incorrectly grouped analytic-emitter
