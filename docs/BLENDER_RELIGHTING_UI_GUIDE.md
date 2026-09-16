@@ -274,7 +274,9 @@ dataparser transform과 scale로 model 좌표에 옮긴다. 현재 AEGIR 데이�
 model_point = scale * (rotation * blender_world_point + translation)
 ```
 
-변환된 bbox에서 중심, 평면 PCA 축, 두 반지름과 `wxyz` quaternion을 구한다.
+변환된 bbox에서 중심, PCA 축, 반지름과 `wxyz` quaternion을 구한다. 2D emitter는
+두 평면 반축을 저장하고, 3D emitter는 bbox 두께와 scene-relative 최소 두께를
+사용한 세 번째 반축까지 저장한다.
 양면 균일 emissive mesh의 초기 방향 파라미터는 다음을 사용한다.
 
 ```text
@@ -283,26 +285,30 @@ spreads        = [32, 32, 32]
 falloff_power  = [1]
 ```
 
-초기 radiance는 scene-linear `rgb * strength`에 모든 조건에서 공통인 하나의
-보정 상수를 곱한다. test condition마다 GT 이미지를 보고 별도 보정하면 oracle
-relighting 수치와 이미지 기반 light fitting 수치가 섞이므로 금지한다.
+Radiance는 scene-linear `rgb * strength`에 기존 학습 조명의 Blender 값과 최종
+학습 emitter radiance 사이에서 구한 공통 RGB 보정값을 곱한다. 이렇게 해야
+새 emitter가 학습된 Gaussian material과 같은 내부 조명 단위를 사용한다. test
+condition마다 GT 이미지를 보고 별도 보정하면 oracle relighting 수치와 이미지
+기반 light fitting 수치가 섞이므로 금지한다.
 
 캡처가 끝난 뒤 다음 명령은 enabled mesh만 골라 AEGIR model 좌표로 변환하고,
 JSON과 바로 로드할 수 있는 tensor state를 데이터셋 폴더에 저장한다. radiance
-보정은 새 test 이미지가 아니라 기존 학습 checkpoint의 초기 emitter radiance를
-사용한다.
+보정은 새 test 이미지가 아니라 기존 학습 checkpoint의 최종 emitter radiance를
+사용한다. 초기 상태 보정은 `--radiance-calibration-state initial`로 재현할 수 있다.
 
 ```bash
 /workspace/.conda/envs/dnsplatter/bin/python \
   scripts/convert_blender_emitters_to_aegir.py \
   --dataset /workspace/hohyun_ws/datasets/aegir_nerfstudio/blender_my_room_relight_new_ellipse_test \
   --dnsplatter-checkpoint /path/to/2dgs/nerfstudio_models/step-000020000.pt \
-  --aegir-checkpoint /path/to/aegir_20k.pt
+  --aegir-checkpoint /path/to/aegir_20k.pt \
+  --radiance-calibration-state final \
+  --emitter-representation ellipsoid_3d
 ```
 
 생성 파일은 `aegir_emitter_override.json`과 `aegir_emitter_override.pt`다.
-JSON에는 중심, 두 반지름, `wxyz` quaternion, local 축, radiance, six-axis gain,
-spread와 falloff가 기록된다.
+JSON에는 중심, 선택한 표현의 두/세 반지름, `wxyz` quaternion, local 축,
+radiance, six-axis gain, spread와 falloff가 기록된다.
 
 현재 저장소에는 기존 checkpoint의 emitter 일부를 선택하는 기능은 있지만,
 새 `emitters.json`을 runtime emitter로 교체하는 CLI는 아직 없다. 다음 구현은

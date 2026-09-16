@@ -1035,8 +1035,8 @@ def test_dbscan_and_pca_use_only_persistent_candidates(monkeypatch) -> None:
     assert torch.allclose(emitters.centers[0], torch.zeros(3), atol=1.0e-6)
     assert float(emitters.scales[0].detach().max()) == pytest.approx(2.0)
     assert float(emitters.scales[0].detach().min()) == pytest.approx(0.03)
-    # A Lambertian area emitter stores radiance directly.
-    assert torch.allclose(emitters.colors[0], torch.ones(3), atol=1.0e-6)
+    # Unit spreads attenuate by exp(-1); the amplitude compensates that kernel.
+    assert torch.allclose(emitters.radiance(torch.tensor([[0., 0., 1.]]))[0, 0], torch.ones(3), atol=1.0e-6)
 
 
 def test_emitter_split_replaces_parent_and_preserves_intensity() -> None:

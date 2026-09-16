@@ -24,9 +24,11 @@ from .config import AEGIRConfig, LossWeights, config_from_dict
 from .data import MultiViewSceneDataset
 from .emitters import AreaEmitterModel
 from .gaussian_scene import GaussianMaterialBackend
+from .hdr_triangulation import seed_emitters_from_hdr_multiview
 from .initialization import (
     restore_ellipsoid_support,
     seed_emitters_from_gbuffer_views,
+    seed_emitters_from_predicted_depth,
     seed_planar_emitters_from_masks,
 )
 from .irgs_tracer import IRGSVisibilityTracer
@@ -38,6 +40,7 @@ from .losses import (
     material_prior_loss,
     photometric_loss,
 )
+from .provenance import training_inputs, validate_practical_geometry, validate_predicted_depth, write_json
 from .render import DeferredRenderer
 from .scene_culling import migrate_refined_adam, refine_scene_gaussians, should_refine_scene
 from .visibility import scene_scale_from_bounds
@@ -185,6 +188,9 @@ def initialize_emitters(
     device: str,
 ) -> AreaEmitterModel:
     representation = config.training.emitter_representation
+    mode = config.training.emitter_initialization
+    if mode not in {"hdr_multiview", "hdr_predicted_depth", "hdr_gbuffer", "gt_mask_depth"}:
+        raise ValueError(f"unsupported emitter initialization {mode!r}")
     if representation not in {"planar_ellipse_2d", "ellipsoid_3d"}:
         raise ValueError(f"unsupported emitter representation {representation!r}")
 
@@ -194,19 +200,51 @@ def initialize_emitters(
         scene_scale = (bounds[1] - bounds[0]).norm()
         return restore_ellipsoid_support(
             value,
-            dataset.emitter_definitions,
+            dataset.emitter_definitions if mode == "gt_mask_depth" else None,
             scene_scale,
             config.training.emitter_min_scale_fraction,
         )
 
-    masked_emitters = seed_planar_emitters_from_masks(
-        dataset.frames,
-        (bounds[0].cpu(), bounds[1].cpu()),
-        emitter_definitions=dataset.emitter_definitions,
-        min_scale_fraction=config.training.emitter_min_scale_fraction,
-        max_emitters=config.adaptive.max_emitters,
-    )
-    if masked_emitters is not None:
+    if mode == "hdr_multiview":
+        validate_predicted_depth(dataset.root, dataset.metadata)
+        emitters, diagnostic = seed_emitters_from_hdr_multiview(
+            dataset.frames, (bounds[0].cpu(), bounds[1].cpu()),
+            quantile=config.training.emitter_init_quantile,
+            grow_fraction=config.training.emitter_region_grow_fraction,
+            min_pixels=config.training.emitter_region_min_pixels,
+            min_views=config.training.emitter_persistence_min_views,
+            min_fraction=config.training.emitter_persistence_min_fraction,
+            reprojection_px=config.training.emitter_reprojection_px,
+            min_angle_deg=config.training.emitter_triangulation_min_angle_deg,
+            min_scale_fraction=config.training.emitter_min_scale_fraction,
+            max_emitters=config.adaptive.max_emitters,
+            representation=representation,
+            progress=lambda message: print(message, flush=True),
+        )
+        dataset.emitter_initialization_diagnostic = diagnostic
+        return emitters.to(device)
+    if mode == "hdr_predicted_depth":
+        validate_predicted_depth(dataset.root, dataset.metadata)
+        emitters = seed_emitters_from_predicted_depth(
+            dataset.frames, (bounds[0].cpu(), bounds[1].cpu()),
+            quantile=config.training.emitter_init_quantile,
+            min_scale_fraction=config.training.emitter_min_scale_fraction,
+            max_emitters=config.adaptive.max_emitters,
+            persistence_min_views=config.training.emitter_persistence_min_views,
+            persistence_min_fraction=config.training.emitter_persistence_min_fraction,
+            persistence_voxel_fraction=config.training.emitter_persistence_voxel_fraction,
+            persistence_radius_fraction=config.training.emitter_persistence_radius_fraction,
+        )
+        return apply_representation(emitters).to(device)
+    if mode == "gt_mask_depth":
+        masked_emitters = seed_planar_emitters_from_masks(
+            dataset.frames, (bounds[0].cpu(), bounds[1].cpu()),
+            emitter_definitions=dataset.emitter_definitions,
+            min_scale_fraction=config.training.emitter_min_scale_fraction,
+            max_emitters=config.adaptive.max_emitters,
+        )
+        if masked_emitters is None:
+            raise ValueError("Explicit GT initialization has no usable masks/depth")
         return apply_representation(masked_emitters).to(device)
 
     targets: list[Tensor] = []
@@ -805,6 +843,9 @@ class SharedGaussianTrainer:
                 "frame_indices": list(self.dataset.selected_indices),
                 "frame_files": [frame.source_frame["file_path"] for frame in self.dataset.frames],
                 "observation_policy": dict(self.observation_policy),
+                "input_provenance": getattr(self.dataset, "training_input_provenance", None),
+                "depth_provenance": self.dataset.metadata.get("aegir_depth_provenance"),
+                "emitter_initialization_diagnostic": getattr(self.dataset, "emitter_initialization_diagnostic", None),
             },
             initial_emitter_state=self.initial_emitter_state,
             training_state=self._capture_training_state(step),
@@ -910,6 +951,11 @@ def train_shared_gaussians(
     max_views: int | None = None,
     max_gaussians: int | None = None,
 ) -> None:
+    if config.training.emitter_initialization in {"hdr_multiview", "hdr_predicted_depth"}:
+        validate_predicted_depth(Path(nerfstudio_dir))
+        validate_practical_geometry(Path(dnsplatter_checkpoint))
+        if emitter_checkpoint is not None:
+            raise ValueError("Practical fresh training must initialize emitters from HDR, not a warm-start checkpoint")
     dataset = MultiViewSceneDataset(
         nerfstudio_dir,
         dnsplatter_checkpoint,
@@ -917,7 +963,9 @@ def train_shared_gaussians(
         image_size=config.raster.image_size,
         max_views=max_views,
         split="train",
+        allow_gt_emitter_initialization=config.training.emitter_initialization == "gt_mask_depth",
     )
+    dataset.training_input_provenance = training_inputs(dataset.root, Path(dnsplatter_checkpoint), dataset.prior_dir)
     scene = GaussianMaterialBackend(
         dnsplatter_checkpoint,
         opacity_threshold=config.raster.opacity_threshold,
@@ -930,6 +978,8 @@ def train_shared_gaussians(
         emitters = initialize_emitters(scene, dataset, bounds, config, device)
     else:
         emitters = load_legacy_emitters(emitter_checkpoint, device)
+    if getattr(dataset, "emitter_initialization_diagnostic", None) is not None:
+        write_json(Path(output_path).parent / "emitter_initialization.json", dataset.emitter_initialization_diagnostic)
     trainer = SharedGaussianTrainer(scene, dataset, emitters, config, output_path, device)
     trainer.fit()
 
@@ -983,7 +1033,17 @@ def resume_shared_gaussians(
         image_size=config.raster.image_size,
         max_views=dataset_meta.get("max_views"),
         split="train",
+        allow_gt_emitter_initialization=config.training.emitter_initialization == "gt_mask_depth",
     )
+    if dataset_meta.get("emitter_initialization_diagnostic") is not None:
+        dataset.emitter_initialization_diagnostic = dataset_meta["emitter_initialization_diagnostic"]
+    if config.training.emitter_initialization in {"hdr_multiview", "hdr_predicted_depth"}:
+        validate_predicted_depth(dataset.root, dataset.metadata)
+        validate_practical_geometry(requested_source)
+        actual_provenance = training_inputs(dataset.root, requested_source, dataset.prior_dir)
+        if dataset_meta.get("input_provenance") != actual_provenance:
+            raise ValueError("Resume input content differs from checkpoint provenance")
+        dataset.training_input_provenance = actual_provenance
     expected_indices = tuple(dataset_meta.get("frame_indices", ()))
     expected_files = tuple(dataset_meta.get("frame_files", ()))
     actual_files = tuple(frame.source_frame["file_path"] for frame in dataset.frames)

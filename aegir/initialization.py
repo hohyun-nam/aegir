@@ -25,6 +25,35 @@ def unproject_opengl_z_depth(depth: Tensor, camera: dict) -> Tensor:
     return (camera_gl.reshape(-1, 4) @ c2w.T)[..., :3].reshape(h, w, 3)
 
 
+def match_initial_radiance(emitters: AreaEmitterModel) -> AreaEmitterModel:
+    """Match constant initial full-sphere radiance to observed HDR medians.
+
+    The default unit spreads/power/gains attenuate every unit direction by
+    exp(-1). Store an amplitude e times the observed radiance, not a dim seed.
+    """
+    with torch.no_grad():
+        emitters.log_colors.add_(1.0)
+    return emitters
+
+
+def seed_emitters_from_predicted_depth(frames: list, bounds, **kwargs) -> AreaEmitterModel:
+    """HDR candidates unprojected through RGB-predicted depth, not scene hits."""
+    kwargs.setdefault("persistence_radius_fraction", 0.01)
+    targets, gbuffers, samples = [], [], []
+    for frame in frames:
+        if frame.radiance_hdr is None or frame.metric_depth is None:
+            raise ValueError("HDR emitter initialization requires HDR observations and certified model depth")
+        depth = frame.metric_depth.cpu()
+        world = unproject_opengl_z_depth(depth, frame.camera)
+        camera_center = torch.as_tensor(frame.camera["c2w"], dtype=depth.dtype)[:3, 3]
+        valid = frame.mask.cpu().bool() & torch.isfinite(depth[..., None]) & (depth[..., None] > 0)
+        # No background G-buffer validity: emitter surface Gaussians may be absent.
+        targets.append(frame.target.cpu())
+        gbuffers.append({"points": world, "camera_origins": camera_center.expand_as(world)})
+        samples.append({"radiance_hdr": frame.radiance_hdr.cpu(), "valid_mask": valid})
+    return seed_emitters_from_gbuffer_views(targets, gbuffers, bounds, samples=samples, score_mode="hdr", allow_fallback=False, **kwargs)
+
+
 def seed_planar_emitters_from_masks(
     frames: list,
     bounds: tuple[Tensor, Tensor],
@@ -124,7 +153,7 @@ def seed_planar_emitters_from_masks(
         and component_emitters.num_emitters > 1
         and not (emitter_definitions and len(emitter_definitions) > 1)
     ):
-        return component_emitters
+        return match_initial_radiance(component_emitters)
 
     if emitter_definitions:
         definitions = emitter_definitions[:max_emitters]
@@ -151,12 +180,12 @@ def seed_planar_emitters_from_masks(
                     condition.get("color", [1.0, 1.0, 1.0]), device=device, dtype=dtype
                 )
                 emitter_colors.append((color * strength).clamp_min(1.0e-3))
-        return AreaEmitterModel(
+        return match_initial_radiance(AreaEmitterModel(
             fitted_centers,
             torch.stack([value[1].clamp_min(scale_floor) for value in fitted]),
             torch.stack(emitter_colors),
             torch.stack([value[2] for value in fitted]),
-        )
+        ))
 
     labels = _cluster_points(xyz, eps, min_samples)
     clusters = [int(value) for value in labels.unique().tolist() if int(value) >= 0]
@@ -175,12 +204,12 @@ def seed_planar_emitters_from_masks(
         emitter_colors.append(torch.quantile(rgb[selected], 0.5, dim=0).clamp_min(1.0e-3))
     if not centers:
         return None
-    return AreaEmitterModel(
+    return match_initial_radiance(AreaEmitterModel(
         torch.stack(centers),
         torch.stack(scales),
         torch.stack(emitter_colors),
         torch.stack(quaternions),
-    )
+    ))
 
 
 def restore_ellipsoid_support(
@@ -426,19 +455,28 @@ def seed_emitters_from_gbuffer_views(
     persistence_min_views: int = 3,
     persistence_min_fraction: float = 0.05,
     persistence_voxel_fraction: float = 0.005,
+    allow_fallback: bool = True,
+    persistence_radius_fraction: float = 0.0,
 ) -> AreaEmitterModel:
     """Initialize emitters from illumination-like bright regions and G-buffer points."""
+
+    def fallback(*args, **kwargs):
+        if not allow_fallback:
+            raise ValueError("No persistent HDR emitter candidates from model depth; inspect candidates/persistence settings")
+        return fallback_single_emitter(*args, **kwargs)
 
     if len(targets) != len(gbuffers):
         raise ValueError("targets and gbuffers must have the same length")
     if not targets:
-        return fallback_single_emitter(bounds)
+        return fallback(bounds)
     if samples is not None and len(samples) != len(targets):
         raise ValueError("samples must match targets when provided")
     if persistence_min_views < 1:
         raise ValueError("persistence_min_views must be >= 1")
     if not 0.0 <= persistence_min_fraction <= 1.0:
         raise ValueError("persistence_min_fraction must be in [0, 1]")
+    if not math.isfinite(persistence_radius_fraction) or persistence_radius_fraction < 0.0:
+        raise ValueError("persistence_radius_fraction must be finite and >= 0")
     if persistence_voxel_fraction <= 0.0:
         raise ValueError("persistence_voxel_fraction must be > 0")
 
@@ -469,7 +507,7 @@ def seed_emitters_from_gbuffer_views(
         if score.numel() > 0:
             scores.append(score)
     if not scores:
-        return fallback_single_emitter(bounds, device=device, dtype=dtype)
+        return fallback(bounds, device=device, dtype=dtype)
     threshold = _candidate_threshold(torch.cat(scores), quantile)
 
     points = []
@@ -511,7 +549,7 @@ def seed_emitters_from_gbuffer_views(
                 )
 
     if not points:
-        return fallback_single_emitter(bounds, device=device, dtype=dtype)
+        return fallback(bounds, device=device, dtype=dtype)
 
     xyz = torch.cat(points, dim=0)
     rgb = torch.cat(colors, dim=0)
@@ -522,16 +560,19 @@ def seed_emitters_from_gbuffer_views(
         max(persistence_min_views, math.ceil(len(targets) * persistence_min_fraction)),
     )
     voxel_size = max(float(scene_scale.detach().cpu()) * persistence_voxel_fraction, 1.0e-6)
-    persistent = _persistent_candidate_mask(
-        xyz,
-        candidate_view_ids,
-        bmin,
-        voxel_size=voxel_size,
-        num_views=len(targets),
-        required_views=required_views,
-    )
+    if persistence_radius_fraction > 0.0:
+        persistent = _radius_persistent_candidate_mask(
+            xyz, candidate_view_ids,
+            radius=float(scene_scale.detach().cpu()) * persistence_radius_fraction,
+            num_views=len(targets), required_views=required_views,
+        )
+    else:
+        persistent = _persistent_candidate_mask(
+            xyz, candidate_view_ids, bmin, voxel_size=voxel_size,
+            num_views=len(targets), required_views=required_views,
+        )
     if not bool(persistent.any()):
-        return fallback_single_emitter(bounds, device=device, dtype=dtype)
+        return fallback(bounds, device=device, dtype=dtype)
 
     # Cluster only candidates that recur at the same 3D location across
     # multiple views.  Letting transient candidates participate in DBSCAN can
@@ -544,8 +585,12 @@ def seed_emitters_from_gbuffer_views(
     labels = _cluster_points(xyz, eps, min_samples)
     unique = [int(v) for v in labels.unique().tolist() if int(v) >= 0]
     unique = [idx for idx in unique if int((labels == idx).sum()) >= min_samples]
+    if persistence_radius_fraction > 0.0:
+        # Nearby votes must also be represented by distinct retained views in
+        # the fitted cluster; never initialize a transient single-view fixture.
+        unique = [idx for idx in unique if candidate_view_ids[labels == idx].unique().numel() >= required_views]
     if not unique:
-        return fallback_single_emitter(bounds, device=device, dtype=dtype)
+        return fallback(bounds, device=device, dtype=dtype)
 
     clusters = sorted(
         unique,
@@ -573,14 +618,14 @@ def seed_emitters_from_gbuffer_views(
         quats.append(quat)
         if use_hdr_colors:
             observed_radiance = torch.quantile(cols, 0.5, dim=0).clamp_min(1.0e-3)
-            emitter_colors.append(observed_radiance)
+            emitter_colors.append(observed_radiance * math.e)
         else:
             # Preserve the legacy relative-radiance seed for LDR-only scenes;
             # their absolute radiometric scale is not identifiable.
             emitter_colors.append(cols.mean(dim=0).clamp_min(1.0e-3) * 8.0)
 
     if not centers:
-        return fallback_single_emitter(bounds, device=device, dtype=dtype)
+        return fallback(bounds, device=device, dtype=dtype)
 
     return AreaEmitterModel(
         torch.stack(centers),
@@ -588,6 +633,41 @@ def seed_emitters_from_gbuffer_views(
         torch.stack(emitter_colors),
         torch.stack(quats),
     )
+
+
+def _radius_persistent_candidate_mask(
+    points: Tensor,
+    view_ids: Tensor,
+    *,
+    radius: float,
+    num_views: int,
+    required_views: int,
+) -> Tensor:
+    """Count distinct observing views within a metric radius of each candidate.
+
+    Query one nearest-neighbor tree per view: thousands of pixels from one view
+    still cast a single vote. This avoids voxel-boundary discontinuities and
+    never allocates a dense candidate-by-candidate distance matrix.
+    """
+    import numpy as np
+    from scipy.spatial import cKDTree
+
+    if points.ndim != 2 or points.shape[-1] != 3 or view_ids.shape != (points.shape[0],):
+        raise ValueError("points must be Nx3 and view_ids must have N entries")
+    if not math.isfinite(radius) or radius <= 0 or num_views < 1 or required_views < 1:
+        raise ValueError("radius, num_views and required_views must be positive")
+    if points.numel() == 0:
+        return torch.zeros(0, dtype=torch.bool, device=points.device)
+    xyz = points.detach().cpu().double().numpy()
+    views = view_ids.detach().cpu().numpy()
+    if not np.isfinite(xyz).all() or np.any(views < 0) or np.any(views >= num_views):
+        raise ValueError("candidates must be finite and have valid view IDs")
+    support = np.zeros(len(xyz), dtype=np.int32)
+    for view in np.unique(views):
+        tree = cKDTree(xyz[views == view])
+        distances, _ = tree.query(xyz, k=1, distance_upper_bound=radius)
+        support += np.isfinite(distances)
+    return torch.from_numpy(support >= min(required_views, num_views)).to(points.device)
 
 
 def _persistent_candidate_mask(

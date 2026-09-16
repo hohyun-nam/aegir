@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Convert Blender emissive-mesh metadata to AEGIR planar emitter state."""
+"""Convert Blender emissive-mesh metadata to an AEGIR emitter state."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Convert enabled Blender emissive meshes in emitters.json into "
-            "AEGIR bounded planar-ellipse emitter parameters."
+            "AEGIR bounded planar-ellipse or ellipsoid emitter parameters."
         )
     )
     parser.add_argument("--dataset", type=Path, required=True)
@@ -38,6 +38,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--radiance-calibration-state",
+        choices=("initial", "final"),
+        default="final",
+        help=(
+            "Checkpoint emitter radiance used to map Blender color*strength into "
+            "the learned map's light units."
+        ),
+    )
+    parser.add_argument(
         "--emitter-name",
         action="append",
         default=[],
@@ -47,6 +56,21 @@ def parse_args() -> argparse.Namespace:
         "--include-disabled",
         action="store_true",
         help="Also convert emitters disabled in the captured lighting condition.",
+    )
+    parser.add_argument(
+        "--emitter-representation",
+        choices=("planar_ellipse_2d", "ellipsoid_3d"),
+        default="planar_ellipse_2d",
+        help="Emitter support written to the runtime state.",
+    )
+    parser.add_argument(
+        "--emitter-min-scale-fraction",
+        type=float,
+        default=None,
+        help=(
+            "Minimum 3D normal semi-axis as a fraction of scene diagonal; "
+            "defaults to the AEGIR checkpoint training value or 0.002."
+        ),
     )
     parser.add_argument("--output-json", type=Path)
     parser.add_argument("--output-pt", type=Path)
@@ -68,6 +92,7 @@ def declared_radiance(emitter: dict[str, Any]) -> torch.Tensor:
 
 def radiance_calibration(
     aegir_checkpoint: Path | None,
+    calibration_state: str,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     if aegir_checkpoint is None:
         return torch.ones(3), {
@@ -76,10 +101,11 @@ def radiance_calibration(
         }
 
     checkpoint = torch.load(aegir_checkpoint, map_location="cpu", weights_only=False)
-    initial = checkpoint.get("initial_emitter_state", {})
-    colors = initial.get("colors")
+    state_key = "emitter_state" if calibration_state == "final" else "initial_emitter_state"
+    emitter_state = checkpoint.get(state_key, {})
+    colors = emitter_state.get("colors")
     if not torch.is_tensor(colors) or colors.ndim != 2 or colors.shape[-1] != 3:
-        raise ValueError(f"{aegir_checkpoint} has no valid initial_emitter_state.colors")
+        raise ValueError(f"{aegir_checkpoint} has no valid {state_key}.colors")
     dataset_root_value = checkpoint.get("dataset", {}).get("nerfstudio_dir")
     if not dataset_root_value:
         raise ValueError(f"{aegir_checkpoint} has no dataset.nerfstudio_dir")
@@ -95,17 +121,57 @@ def radiance_calibration(
 
     reference_declared = torch.stack([declared_radiance(value) for value in reference_emitters])
     declared_center = reference_declared.median(dim=0).values.clamp_min(1.0e-8)
-    initial_center = colors.detach().float().median(dim=0).values
-    scale = initial_center / declared_center
+    aegir_center = colors.detach().float().median(dim=0).values
+    scale = aegir_center / declared_center
     return scale, {
-        "method": "training_checkpoint_initial_radiance",
+        "method": f"training_checkpoint_{calibration_state}_radiance",
         "rgb_scale": scale.tolist(),
         "reference_aegir_checkpoint": str(aegir_checkpoint.resolve()),
         "reference_emitters_json": str(reference_path.resolve()),
         "reference_declared_radiance": declared_center.tolist(),
-        "reference_initial_radiance": initial_center.tolist(),
+        "reference_aegir_radiance": aegir_center.tolist(),
+        "checkpoint_emitter_state": state_key,
         "uses_target_relight_images": False,
     }
+
+
+def ellipsoid_scale_floor(
+    aegir_checkpoint: Path | None,
+    requested_fraction: float | None,
+) -> tuple[float, float]:
+    """Return the scene-relative normal semi-axis floor and its fraction."""
+
+    fraction = 0.002 if requested_fraction is None else float(requested_fraction)
+    if fraction <= 0.0:
+        raise ValueError("emitter_min_scale_fraction must be positive")
+    if aegir_checkpoint is None:
+        raise ValueError(
+            "ellipsoid_3d conversion requires --aegir-checkpoint to determine scene scale"
+        )
+    checkpoint = torch.load(aegir_checkpoint, map_location="cpu", weights_only=False)
+    if requested_fraction is None:
+        fraction = float(
+            checkpoint.get("config", {})
+            .get("training", {})
+            .get("emitter_min_scale_fraction", fraction)
+        )
+    bounds = checkpoint.get("training_state", {}).get("bounds")
+    if not isinstance(bounds, (tuple, list)) or len(bounds) != 2:
+        means = checkpoint.get("scene_state", {}).get("means")
+        if not torch.is_tensor(means) or means.ndim != 2 or means.shape[-1] != 3:
+            raise ValueError(f"{aegir_checkpoint} has no scene bounds or Gaussian means")
+        quantile = float(
+            checkpoint.get("config", {})
+            .get("raster", {})
+            .get("bounds_quantile", 0.005)
+        )
+        bmin = torch.quantile(means.float(), quantile, dim=0)
+        bmax = torch.quantile(means.float(), 1.0 - quantile, dim=0)
+        padding = (bmax - bmin).norm() * 0.02
+        bounds = (bmin - padding, bmax + padding)
+    bmin, bmax = (torch.as_tensor(value).float() for value in bounds)
+    scene_diagonal = float((bmax - bmin).norm())
+    return max(scene_diagonal * fraction, 1.0e-4), fraction
 
 
 def main() -> None:
@@ -138,8 +204,16 @@ def main() -> None:
     matrix, model_scale = saved_to_model
     rotation, translation = matrix[:, :3], matrix[:, 3]
     color_scale, calibration = radiance_calibration(
-        args.aegir_checkpoint.resolve() if args.aegir_checkpoint else None
+        args.aegir_checkpoint.resolve() if args.aegir_checkpoint else None,
+        args.radiance_calibration_state,
     )
+    normal_scale_floor = None
+    min_scale_fraction = None
+    if args.emitter_representation == "ellipsoid_3d":
+        normal_scale_floor, min_scale_fraction = ellipsoid_scale_floor(
+            args.aegir_checkpoint.resolve() if args.aegir_checkpoint else None,
+            args.emitter_min_scale_fraction,
+        )
 
     records: list[dict[str, Any]] = []
     centers, scales, quaternions, colors = [], [], [], []
@@ -151,15 +225,23 @@ def main() -> None:
         center, ellipse_scale, quaternion = _fit_planar_bbox(model)
         quaternion = safe_normalize(quaternion, dim=0)
         axes = quat_to_matrix(quaternion[None])[0]
+        emitter_scale = ellipse_scale
+        if args.emitter_representation == "ellipsoid_3d":
+            centered = model - center
+            normal_scale = (centered @ axes[:, 2]).abs().amax().clamp_min(normal_scale_floor)
+            emitter_scale = torch.cat((ellipse_scale, normal_scale[None]))
         color = declared_radiance(emitter) * color_scale
-        area = math.pi * float(ellipse_scale.prod())
+        if args.emitter_representation == "ellipsoid_3d":
+            area = 4.0 * math.pi * float(emitter_scale.prod().pow(2.0 / 3.0))
+        else:
+            area = math.pi * float(emitter_scale.prod())
         records.append(
             {
                 "name": emitter.get("name"),
                 "emitter_id": emitter.get("emitter_id"),
-                "representation": "planar_ellipse_2d",
+                "representation": args.emitter_representation,
                 "center_model": center.tolist(),
-                "semi_axes_model": ellipse_scale.tolist(),
+                "semi_axes_model": emitter_scale.tolist(),
                 "quaternion_wxyz": quaternion.tolist(),
                 "local_x_axis_model": axes[:, 0].tolist(),
                 "local_y_axis_model": axes[:, 1].tolist(),
@@ -174,7 +256,7 @@ def main() -> None:
             }
         )
         centers.append(center)
-        scales.append(ellipse_scale)
+        scales.append(emitter_scale)
         quaternions.append(quaternion)
         colors.append(color)
 
@@ -198,8 +280,11 @@ def main() -> None:
         "source_condition": emitter_payload.get("condition"),
         "dnsplatter_checkpoint": str(dnsplatter_checkpoint),
         "coordinate_system": "AEGIR model coordinates",
+        "emitter_representation": args.emitter_representation,
         "saved_to_model_transform": matrix.tolist(),
         "saved_to_model_scale": float(model_scale),
+        "emitter_min_scale_fraction": min_scale_fraction,
+        "normal_scale_floor_model": normal_scale_floor,
         "radiance_calibration": calibration,
         "emitter_count": n,
         "emitters": records,

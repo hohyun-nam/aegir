@@ -15,6 +15,7 @@ LAMBDA_DEPTH="${LAMBDA_DEPTH:-0.2}"
 LAMBDA_INVALID_OPACITY="${LAMBDA_INVALID_OPACITY:-0.0}"
 INVALID_OPACITY_PROTECTION_RADIUS="${INVALID_OPACITY_PROTECTION_RADIUS:-5}"
 DEPTH_LOSS_TYPE="${DEPTH_LOSS_TYPE:-pearson}"
+ALLOW_UNVERIFIED_DEPTH="${ALLOW_UNVERIFIED_DEPTH:-0}"
 DATA_PATH="${DATA_PATH:-}"
 DENSIFY_UNTIL_ITER="${DENSIFY_UNTIL_ITER:-15000}"
 DENSIFY_GRAD_THRESHOLD="${DENSIFY_GRAD_THRESHOLD:-0.0002}"
@@ -58,6 +59,8 @@ export TORCH_HOME="$WORKSPACE/.cache/torch"
 export XDG_CACHE_HOME="$WORKSPACE/.cache"
 export PYTHONPATH="$AEGIR_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
+export ITERATIONS DEPTH_LOSS_TYPE LAMBDA_DEPTH LAMBDA_INVALID_OPACITY INVALID_OPACITY_PROTECTION_RADIUS LAMBDA_DIST DENSIFY_UNTIL_ITER DENSIFY_GRAD_THRESHOLD ALLOW_UNVERIFIED_DEPTH TWO_DGS_ROOT
+
 mkdir -p "$OUTPUT_ROOT" "$LOG_ROOT" "$CUDA_STUBS"
 status_file="$LOG_ROOT/status.tsv"
 touch "$status_file"
@@ -81,7 +84,8 @@ for scene in "${SCENES[@]}"; do
     status "$scene" failed "missing prepared RGB+pose+mask+depth dataset: $data"
     exit 1
   fi
-  if [[ -s "$checkpoint" ]]; then
+  verified=$("$PYTHON" "$AEGIR_ROOT/scripts/check_training_provenance.py" --stage 2dgs --action begin --data "$data" --output "$checkpoint")
+  if [[ "$verified" == "1" ]]; then
     status "$scene" skipped "verified output already exists: $checkpoint"
     continue
   fi
@@ -129,5 +133,6 @@ assert scene.scales.shape == (scene.gaussian_count, 2)
 assert scene.training_sh_degree == 3
 print("AEGIR_NATIVE_2DGS_PREFLIGHT_OK", scene.gaussian_count)
 PY
+  "$PYTHON" "$AEGIR_ROOT/scripts/check_training_provenance.py" --stage 2dgs --action complete --data "$data" --output "$checkpoint"
   status "$scene" complete "$checkpoint"
 done

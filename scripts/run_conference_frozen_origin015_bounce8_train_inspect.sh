@@ -8,10 +8,10 @@ BASE=$(realpath "$WORKSPACE/..")
 DNS_ENV="${DNS_ENV:-$BASE/.conda/envs/dnsplatter}"
 PYTHON="$DNS_ENV/bin/python"
 
-GEOMETRY="${GEOMETRY:-$AEGIR_ROOT/outputs/2dgs_depth_pearson_10k_20260821/fipt_real_conference/nerfstudio_models/step-000010000.pt}"
-DATA="${DATA:-$WORKSPACE/datasets/aegir_nerfstudio/fipt_real_conference}"
+GEOMETRY="${GEOMETRY:-$AEGIR_ROOT/outputs/2dgs_fipt_real_conference_preddepth_pearson20k_invalid002_protect7_v1/fipt_real_conference/nerfstudio_models/step-000020000.pt}"
+DATA="${DATA:-$WORKSPACE/datasets/aegir_nerfstudio/fipt_real_conference_rgb_zoedn_metrez_v1}"
 PRIORS="${PRIORS:-$WORKSPACE/datasets/diffusionrenderer_priors/fipt_real_conference}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-$AEGIR_ROOT/outputs/aegir_conference_planar_directional_bounce8_v14_20260914/fipt_real_conference}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$AEGIR_ROOT/outputs/aegir_conference_preddepth_hdrmv_planar128x8_v2/fipt_real_conference}"
 BOUNCE_SAMPLES="${BOUNCE_SAMPLES:-8}"
 INSPECT_BOUNCE_SAMPLES="${INSPECT_BOUNCE_SAMPLES:-$BOUNCE_SAMPLES}"
 BOUNCE_CHUNK_SIZE="${BOUNCE_CHUNK_SIZE:-65536}"
@@ -36,6 +36,8 @@ EMITTER_SCALE_MIN_RATIO="${EMITTER_SCALE_MIN_RATIO:-0.1}"
 EMITTER_SCALE_MAX_RATIO="${EMITTER_SCALE_MAX_RATIO:-1.0}"
 EMITTER_ADAPTATION="${EMITTER_ADAPTATION:-0}"
 EMITTER_REPRESENTATION="${EMITTER_REPRESENTATION:-planar_ellipse_2d}"
+EMITTER_INITIALIZATION="${EMITTER_INITIALIZATION:-hdr_multiview}"
+EMITTER_PERSISTENCE_RADIUS_FRACTION="${EMITTER_PERSISTENCE_RADIUS_FRACTION:-0.01}"
 CHECKPOINT="$OUTPUT_ROOT/aegir_20k.pt"
 INSPECT_ROOT="$OUTPUT_ROOT/inspect_compare30"
 LOG="$OUTPUT_ROOT/train_inspect.log"
@@ -58,12 +60,17 @@ for required in \
     exit 1
   fi
 done
+# Keep NVIDIA OpenGL/Mesa libraries out of the Python/OpenCV search path.
+OPTIX_RUNTIME_LIB="$AEGIR_ROOT/outputs/optix_runtime_only"
+mkdir -p "$OPTIX_RUNTIME_LIB"
+ln -sfn "$OPTIX_DRIVER_LIB/libnvoptix.so.1" "$OPTIX_RUNTIME_LIB/libnvoptix.so.1"
+ln -sfn "$OPTIX_DRIVER_LIB/libnvidia-rtcore.so.580.173.02" "$OPTIX_RUNTIME_LIB/libnvidia-rtcore.so.580.173.02"
 export CUDA_HOME="$CUDA_ROOT"
 export TORCH_CUDA_ARCH_LIST=12.0
 export TORCH_EXTENSIONS_DIR="$AEGIR_ROOT/outputs/torch_extensions_cache_workspace"
 export PATH="$DNS_ENV/bin:$CUDA_ROOT/bin:$PATH"
 export LIBRARY_PATH="$CUDA_STUBS:$CUDA_ROOT/lib:$CUDA_ROOT/lib64${LIBRARY_PATH:+:$LIBRARY_PATH}"
-export LD_LIBRARY_PATH="$OPTIX_DRIVER_LIB:$CUDA_STUBS:$CUDA_ROOT/lib:$CUDA_ROOT/lib64:$DNS_ENV/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="$OPTIX_RUNTIME_LIB:$CUDA_STUBS:$CUDA_ROOT/lib:$CUDA_ROOT/lib64:$DNS_ENV/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD=1
 export TORCH_HOME="$WORKSPACE/.cache/torch"
 export XDG_CACHE_HOME="$WORKSPACE/.cache"
@@ -106,7 +113,7 @@ export SIX_AXIS_EMISSION EMITTER_AXIS_LOBE_SHARPNESS
 export OPTIMIZE_EMITTER_CENTERS OPTIMIZE_EMITTER_ROTATIONS OPTIMIZE_EMITTER_SCALES
 export CONSTRAIN_EMITTER_SCALES EMITTER_SCALE_MIN_RATIO EMITTER_SCALE_MAX_RATIO
 export EMITTER_ADAPTATION
-export EMITTER_REPRESENTATION
+export EMITTER_REPRESENTATION EMITTER_INITIALIZATION EMITTER_PERSISTENCE_RADIUS_FRACTION
 
 mkdir -p "$OUTPUT_ROOT" "$CUDA_STUBS" "$TORCH_EXTENSIONS_DIR"
 exec > >(tee -a "$LOG") 2>&1
@@ -119,7 +126,8 @@ echo "geometry_lr=$GEOMETRY_LR scene_culling=$SCENE_CULLING raster_size=$RASTER_
 echo "emitter_representation=$EMITTER_REPRESENTATION emitter_centers_trainable=$OPTIMIZE_EMITTER_CENTERS emitter_rotations_trainable=$OPTIMIZE_EMITTER_ROTATIONS emitter_scales_trainable=$OPTIMIZE_EMITTER_SCALES emitter_scale_constraint=$CONSTRAIN_EMITTER_SCALES scale_ratio=[$EMITTER_SCALE_MIN_RATIO,$EMITTER_SCALE_MAX_RATIO] emitter_adaptation=$EMITTER_ADAPTATION"
 echo "training_transport_mode=$TRAINING_TRANSPORT_MODE sh_fade=[$SH_FADE_START,$SH_FADE_END] material_freeze=15000 light_white_target=$LIGHT_WHITE light_white_ramp_end=$LIGHT_WHITE_RAMP_END"
 
-if [[ ! -s "$CHECKPOINT" ]]; then
+verified=$("$PYTHON" scripts/check_training_provenance.py --stage aegir --action begin --data "$DATA" --geometry "$GEOMETRY" --priors "$PRIORS" --output "$CHECKPOINT")
+if [[ "$verified" != "1" ]]; then
   resume=""
   shopt -s nullglob
   intermediate=("${CHECKPOINT%.pt}".step*.pt)
@@ -157,6 +165,8 @@ config.training.neutral_albedo = float(os.environ["NEUTRAL_ALBEDO"])
 config.training.emitter_lr = 1.0e-3
 config.training.emitter_final_lr = 1.0e-4
 config.training.emitter_representation = os.environ["EMITTER_REPRESENTATION"]
+config.training.emitter_initialization = os.environ["EMITTER_INITIALIZATION"]
+config.training.emitter_persistence_radius_fraction = float(os.environ["EMITTER_PERSISTENCE_RADIUS_FRACTION"])
 config.training.optimize_emitter_centers = os.environ["OPTIMIZE_EMITTER_CENTERS"] == "1"
 config.training.optimize_emitter_rotations = os.environ["OPTIMIZE_EMITTER_ROTATIONS"] == "1"
 config.training.optimize_emitter_scales = os.environ["OPTIMIZE_EMITTER_SCALES"] == "1"
@@ -195,6 +205,7 @@ train_shared_gaussians(
 )
 PY
   fi
+  "$PYTHON" scripts/check_training_provenance.py --stage aegir --action complete --data "$DATA" --geometry "$GEOMETRY" --priors "$PRIORS" --output "$CHECKPOINT"
 else
   checkpoint_format=$(
     "$PYTHON" - "$CHECKPOINT" <<'PY'
@@ -242,6 +253,17 @@ BOUNCE_SAMPLES="$INSPECT_BOUNCE_SAMPLES" \
 MAX_VIEWS=30 \
 bash "$AEGIR_ROOT/scripts/run_conference_secondary_inspect_export.sh"
 
+echo "Creating matched 128-sample inspect with indirect denoiser"
+"$PYTHON" -m aegir.cli inspect \
+  --checkpoint "$CHECKPOINT" --nerfstudio-dir "$DATA" --prior-dir "$PRIORS" \
+  --output-dir "$OUTPUT_ROOT/inspect_denoised30" --split all --max-views 30 \
+  --render-samples 128 --bounce-samples "$INSPECT_BOUNCE_SAMPLES" --evaluation-seed 2026 \
+  --denoise-indirect --device cuda
+"$PYTHON" scripts/compose_denoiser_comparison.py \
+  --baseline-dir "$INSPECT_ROOT/inspect_secondary_bounce" \
+  --denoised-dir "$OUTPUT_ROOT/inspect_denoised30" \
+  --output-dir "$OUTPUT_ROOT/denoiser_comparison30"
+
 echo "Creating 30-view GT / DiffusionRenderer albedo / learned albedo comparison"
 "$PYTHON" scripts/compare_checkpoint_albedo.py \
   --checkpoint "$CHECKPOINT" \
@@ -257,3 +279,4 @@ echo "inspect: $INSPECT_ROOT/inspect_secondary_bounce"
 echo "target/render frames: $INSPECT_ROOT/inspect_secondary_bounce/target_render_compare_frames"
 echo "PLY: $INSPECT_ROOT/aegir_20k_scene_emitters.ply"
 echo "Albedo comparison: $OUTPUT_ROOT/albedo_comparison30"
+echo "Denoiser comparison: $OUTPUT_ROOT/denoiser_comparison30"

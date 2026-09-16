@@ -204,6 +204,7 @@ class MultiViewSceneDataset:
         image_size: int = 128,
         max_views: int | None = None,
         split: str = "train",
+        allow_gt_emitter_initialization: bool = False,
     ) -> None:
         self.root = Path(nerfstudio_dir).resolve()
         self.checkpoint = Path(dnsplatter_checkpoint).resolve()
@@ -226,7 +227,10 @@ class MultiViewSceneDataset:
         self.selected_indices = tuple(selected_indices)
         dataparser = load_dataparser_transform(infer_dataparser_transform_path(self.checkpoint))
         saved_to_model = saved_pose_to_model_transform(dataparser, metadata)
-        self.emitter_definitions = self._load_emitter_definitions(saved_to_model)
+        self.emitter_definitions = (
+            self._load_emitter_definitions(saved_to_model)
+            if allow_gt_emitter_initialization else []
+        )
         self.frames = [
             self._load_frame(index, source_frames[index], metadata, saved_to_model)
             for index in selected_indices
@@ -350,7 +354,7 @@ class MultiViewSceneDataset:
                     priors[name] = resize_map(value, target.shape[:2])
             if "radiance_hdr" in payload:
                 radiance_hdr = resize_map(payload["radiance_hdr"].float(), target.shape[:2])
-        if radiance_hdr is None and "radiance_hdr_file_path" in frame:
+        if "radiance_hdr_file_path" in frame:
             hdr = np.load(self.root / frame["radiance_hdr_file_path"]).astype(np.float32)
             radiance_hdr = resize_map(torch.from_numpy(hdr.copy()), target.shape[:2])
         if radiance_hdr is not None:

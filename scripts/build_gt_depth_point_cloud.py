@@ -11,6 +11,15 @@ import numpy as np
 import open3d as o3d
 from PIL import Image
 
+from aegir.data import select_frame_indices
+from aegir.provenance import (
+    artifact_request,
+    dataset_signature,
+    publish_artifact,
+    validate_predicted_depth,
+    verify_cache,
+)
+
 
 def resolve(root: Path, value: str | Path) -> Path:
     path = Path(value)
@@ -27,7 +36,7 @@ def load_depth(path: Path) -> np.ndarray:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Back-project metric GT Z-depth and fixed OpenGL camera poses into a seed PLY."
+        description="Back-project certified RGB-model metre Z-depth and fixed poses into a seed PLY."
     )
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -55,6 +64,7 @@ def main() -> None:
         default=2,
         help="Emitter exclusion margin in source-image pixels (default: 2).",
     )
+    parser.add_argument("--allow-gt-depth", action="store_true", help="Explicit diagnostic opt-in for uncertified/GT depth")
     args = parser.parse_args()
 
     data = args.data.resolve()
@@ -72,13 +82,22 @@ def main() -> None:
     with transforms_path.open("r", encoding="utf-8") as stream:
         meta = json.load(stream)
 
+    if not args.allow_gt_depth:
+        validate_predicted_depth(data, meta)
+    request = artifact_request("depth_seed", {key: value for key, value in vars(args).items() if key not in {"data", "output", "update_transforms"}}, {"source": dataset_signature(data)})
+    manifest_path = output.with_suffix(output.suffix + ".provenance.json")
+    if verify_cache(manifest_path, request, output):
+        print(f"Verified seed cache: {output}")
+        return
+    selected = set(select_frame_indices(meta, meta["frames"], args.split or "all"))
+
     points_chunks: list[np.ndarray] = []
     colors_chunks: list[np.ndarray] = []
     used_frames = 0
     sampled_pixels = 0
 
-    for frame in meta["frames"]:
-        if args.split and frame.get("split", "train") != args.split:
+    for index, frame in enumerate(meta["frames"]):
+        if index not in selected:
             continue
 
         image_path = resolve(data, frame["file_path"])
@@ -191,6 +210,7 @@ def main() -> None:
     if not o3d.io.write_point_cloud(str(output), cloud, write_ascii=False, compressed=False):
         raise RuntimeError(f"failed to write {output}")
 
+    publish_artifact(manifest_path, request, output)
     xyz = np.asarray(cloud.points)
     print(f"frames: {used_frames}")
     print(f"sampled valid pixels: {sampled_pixels}")

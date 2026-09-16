@@ -11,7 +11,19 @@ import cv2
 import numpy as np
 from PIL import Image
 
+from aegir.provenance import (
+    artifact_request,
+    dataset_signature,
+    publish_artifact,
+    sha256_file,
+    validate_depth_directory,
+    validate_model_depth_seed,
+    verify_cache,
+    write_json,
+)
+
 TOP_LEVEL_SUPERVISION_KEYS = {
+    "aegir_depth_provenance",
     "aegir_depth_convention",
     "aegir_depth_mode",
     "depth_unit_scale_factor",
@@ -27,6 +39,9 @@ FRAME_SUPERVISION_KEYS = {
     "depth_file_path",
     "normal_camera_file_path",
     "normal_file_path",
+    "normal_world_file_path",
+    "metallic_gt_file_path",
+    "object_id_file_path",
     "radiance_hdr_file_path",
     "roughness_gt_file_path",
     "emitter_mask_path",
@@ -106,6 +121,7 @@ def main() -> None:
         default=None,
         help="Optional PLY seed to expose as output/point_cloud.ply instead of source/colmap.",
     )
+    parser.add_argument("--allow-unverified-depth", action="store_true", help="Explicit legacy/GT diagnostic mode; never used by practical pipeline")
     args = parser.parse_args()
 
     source = args.source.resolve()
@@ -130,6 +146,29 @@ def main() -> None:
         raise FileNotFoundError(source / "colmap" / "sparse_pc.ply")
     if point_cloud_source is not None and not point_cloud_source.is_file():
         raise FileNotFoundError(point_cloud_source)
+
+    depth_manifest = None
+    if args.mono_depth_source is not None and not args.allow_unverified_depth:
+        depth_manifest = validate_depth_directory(args.mono_depth_source)
+    seed_provenance = None
+    if depth_manifest is not None:
+        if point_cloud_source is None:
+            raise ValueError("Certified model-depth pipeline requires its predicted-depth PLY seed")
+        seed_provenance = validate_model_depth_seed(point_cloud_source)
+    request = artifact_request("native_2dgs_view", {
+        "generator_sha256": sha256_file(Path(__file__)),
+        "dilation": args.emitter_mask_dilation, "exclude_emitters": args.exclude_emitter_masks,
+        "emitter_exemption": args.encode_emitter_exemption,
+        "allow_unverified_depth": args.allow_unverified_depth,
+    }, {"source": dataset_signature(source), "depth": depth_manifest,
+        "seed_sha256": sha256_file(point_cloud_source or source / "colmap/sparse_pc.ply"),
+        "seed_provenance": seed_provenance})
+    cache_path = output / "geometry_view_provenance.json"
+    if verify_cache(cache_path, request, output / "transforms.json"):
+        if json.loads(cache_path.read_text()).get("derived_signature") != dataset_signature(output):
+            raise ValueError("Prepared masks/depth/seed changed; choose a fresh geometry view")
+        print(f"Verified geometry-view cache: {output}")
+        return
 
     with transforms_path.open("r", encoding="utf-8") as stream:
         transforms = json.load(stream)
@@ -240,12 +279,38 @@ def main() -> None:
         ensure_relative_symlink(source / "colmap", output, "colmap")
     else:
         ensure_relative_symlink(point_cloud_source, output, "point_cloud.ply")
+        if seed_provenance is not None:
+            ensure_relative_symlink(point_cloud_source.with_suffix(point_cloud_source.suffix + ".provenance.json"), output, "point_cloud.ply.provenance.json")
     if args.mono_depth_source is not None:
         mono_depth_source = args.mono_depth_source.resolve()
         ensure_relative_symlink(mono_depth_source, output, "mono_depth")
+    # Native DN/2DGS strips a leading slash from filenames before resolving them.
+    # Publish RGB links with stable relative names and remap split lists together.
+    image_dir = output / "images"
+    image_dir.mkdir(exist_ok=True)
+    remap = {}
+    for frame in transforms["frames"]:
+        original = frame["file_path"]
+        rgb_source = resolve(source, original)
+        name = Path(original).name
+        destination = image_dir / name
+        if destination.exists():
+            if destination.resolve() != rgb_source.resolve():
+                raise ValueError(f"RGB link/name collision: {destination}")
+        else:
+            ensure_relative_symlink(rgb_source, image_dir, name)
+        remap[original] = f"images/{name}"
+        frame["file_path"] = remap[original]
+    for key in ("train_filenames", "val_filenames", "test_filenames"):
+        if key in transforms:
+            transforms[key] = [remap[value] for value in transforms[key]]
     with (output / "transforms.json").open("w", encoding="utf-8") as stream:
         json.dump(transforms, stream, indent=2)
         stream.write("\n")
+    publish_artifact(cache_path, request, output / "transforms.json")
+    stored = json.loads(cache_path.read_text())
+    stored["derived_signature"] = dataset_signature(output)
+    write_json(cache_path, stored)
     print(f"frames: {len(transforms['frames'])}")
     print(f"wrote: {output / 'transforms.json'}")
 

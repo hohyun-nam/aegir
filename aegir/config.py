@@ -98,6 +98,10 @@ class TrainingConfig:
     # restores the pre-v13 three-axis analytic emitter without changing the
     # underlying 2D Gaussian scene representation.
     emitter_representation: str = "planar_ellipse_2d"
+    # Practical emitter pose/support comes from HDR regions and calibrated
+    # multi-view rays; certified predicted depth is only background supervision.
+    # Legacy depth/GT initialization modes require explicit selection.
+    emitter_initialization: str = "hdr_multiview"
     # Keep the initialized light proxy attached to the detected fixture. Scale
     # may shrink, but cannot grow beyond its initialized extent by default.
     optimize_emitter_centers: bool = False
@@ -130,9 +134,15 @@ class TrainingConfig:
     neutral_albedo: float = 0.5
     emitter_init_score: str = "hdr"
     emitter_init_quantile: float = 0.995
+    emitter_region_grow_fraction: float = 0.8
+    emitter_region_min_pixels: int = 12
+    emitter_reprojection_px: float = 3.0
+    emitter_triangulation_min_angle_deg: float = 3.0
     emitter_persistence_min_views: int = 3
     emitter_persistence_min_fraction: float = 0.05
     emitter_persistence_voxel_fraction: float = 0.005
+    # Model-depth candidates need geometric tolerance, not identical voxel IDs.
+    emitter_persistence_radius_fraction: float = 0.01
     # Keep the PCA seed floor small enough to retain thin light fixtures.
     # This is a radius fraction of the scene-bounds diagonal.
     emitter_min_scale_fraction: float = 0.002
