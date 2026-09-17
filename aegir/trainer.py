@@ -262,6 +262,7 @@ def initialize_emitters(
             min_scale_fraction=config.training.emitter_min_scale_fraction,
             max_emitters=config.adaptive.max_emitters,
             representation=representation,
+            merge_collinear_fragments=config.training.merge_collinear_emitter_fragments,
             progress=lambda message: print(message, flush=True),
         )
         dataset.emitter_initialization_diagnostic = diagnostic

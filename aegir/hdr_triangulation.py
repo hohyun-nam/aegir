@@ -404,6 +404,178 @@ def _silhouette_plane(center, observations, ids, diagonal, tolerance):
     )
 
 
+def _merge_collinear_fragments(models, diagonal):
+    """Merge independently fitted HDR pieces that belong to one long strip."""
+
+    if len(models) < 2:
+        return models, []
+    centers = np.asarray([m["center"] for m in models])
+    major_axes, major_scales, anisotropy = [], [], []
+    for model in models:
+        scales = np.asarray(model["scales"][:2])
+        axis = int(np.argmax(scales))
+        major_axes.append(np.asarray(model["basis"])[:, axis])
+        major_scales.append(float(scales[axis]))
+        anisotropy.append(float(scales[axis] / max(scales[1 - axis], 1e-9)))
+    major_axes = np.asarray(major_axes)
+    major_scales = np.asarray(major_scales)
+    elongated = np.asarray(anisotropy) >= 3.0
+    parent = np.arange(len(models))
+
+    def find(index):
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(first, second):
+        first, second = find(first), find(second)
+        if first != second:
+            parent[second] = first
+
+    cosine_limit = math.cos(math.radians(15.0))
+    for first in range(len(models)):
+        if not elongated[first]:
+            continue
+        for second in range(first + 1, len(models)):
+            if not elongated[second]:
+                continue
+            alignment = abs(float(major_axes[first] @ major_axes[second]))
+            if alignment < cosine_limit:
+                continue
+            other_axis = major_axes[second]
+            if major_axes[first] @ other_axis < 0:
+                other_axis = -other_axis
+            axis = major_axes[first] + other_axis
+            axis /= np.linalg.norm(axis)
+            delta = centers[second] - centers[first]
+            line_distance = np.linalg.norm(delta - axis * (delta @ axis))
+            interval_gap = max(
+                0.0,
+                abs(float(delta @ axis)) - major_scales[first] - major_scales[second],
+            )
+            if line_distance <= diagonal * 0.04 and interval_gap <= diagonal * 0.02:
+                union(first, second)
+
+    components = {}
+    for index in np.flatnonzero(elongated):
+        components.setdefault(find(int(index)), []).append(int(index))
+    components = [indices for indices in components.values() if len(indices) >= 2]
+    if not components:
+        return models, []
+
+    component_axes = []
+    for indices in components:
+        axes = major_axes[indices].copy()
+        axes[(axes @ axes[0]) < 0] *= -1
+        axis = np.average(axes, axis=0, weights=major_scales[indices])
+        component_axes.append(axis / np.linalg.norm(axis))
+
+    attachments = {index: [] for index in range(len(components))}
+    assigned = {item for component in components for item in component}
+    for index in range(len(models)):
+        if index in assigned:
+            continue
+        best = None
+        for component_index, indices in enumerate(components):
+            axis = component_axes[component_index]
+            component_center = centers[indices].mean(axis=0)
+            delta = centers[index] - component_center
+            line_distance = np.linalg.norm(delta - axis * (delta @ axis))
+            coordinates = centers[indices] @ axis
+            lower = np.min(coordinates - major_scales[indices])
+            upper = np.max(coordinates + major_scales[indices])
+            coordinate = float(centers[index] @ axis)
+            outside = max(lower - coordinate, coordinate - upper, 0.0)
+            score = line_distance + outside
+            if (
+                line_distance <= diagonal * 0.05
+                and outside <= diagonal * 0.02
+                and (best is None or score < best[0])
+            ):
+                best = score, component_index
+        if best is not None:
+            attachments[best[1]].append(index)
+            assigned.add(index)
+
+    merged, merge_records = [], []
+    for component_index, core_indices in enumerate(components):
+        axis = component_axes[component_index]
+        family = [
+            index
+            for index in np.flatnonzero(elongated)
+            if abs(float(major_axes[index] @ axis)) >= cosine_limit
+        ]
+        family_centers = centers[family]
+        values, vectors = np.linalg.eigh(np.cov(family_centers, rowvar=False, bias=True))
+        if len(family) >= 3 and values[1] > (diagonal * 0.002) ** 2:
+            normal = vectors[:, 0]
+        else:
+            normals = np.asarray([models[index]["basis"][:, 2] for index in core_indices])
+            normals[(normals @ normals[0]) < 0] *= -1
+            normal = normals.mean(axis=0)
+        normal -= axis * (normal @ axis)
+        normal /= np.linalg.norm(normal)
+        average_normal = np.mean([models[index]["basis"][:, 2] for index in core_indices], axis=0)
+        if normal @ average_normal < 0:
+            normal = -normal
+        cross_axis = np.cross(normal, axis)
+        cross_axis /= np.linalg.norm(cross_axis)
+        normal = np.cross(axis, cross_axis)
+        normal /= np.linalg.norm(normal)
+
+        major_edges, cross_edges = [], []
+        for index in core_indices:
+            model = models[index]
+            basis = np.asarray(model["basis"])
+            scales = np.asarray(model["scales"][:2])
+            major_radius = np.sqrt(np.sum(((basis[:, :2].T @ axis) * scales) ** 2))
+            cross_radius = np.sqrt(np.sum(((basis[:, :2].T @ cross_axis) * scales) ** 2))
+            major_coordinate = float(model["center"] @ axis)
+            cross_coordinate = float(model["center"] @ cross_axis)
+            major_edges.extend((major_coordinate - major_radius, major_coordinate + major_radius))
+            cross_edges.extend((cross_coordinate - cross_radius, cross_coordinate + cross_radius))
+        major_center = 0.5 * (min(major_edges) + max(major_edges))
+        cross_center = 0.5 * (min(cross_edges) + max(cross_edges))
+        normal_center = float(np.median(centers[core_indices] @ normal))
+        center = major_center * axis + cross_center * cross_axis + normal_center * normal
+        scales = [
+            0.5 * (max(major_edges) - min(major_edges)),
+            0.5 * (max(cross_edges) - min(cross_edges)),
+        ]
+        if len(models[core_indices[0]]["scales"]) == 3:
+            scales.append(float(np.median([models[index]["scales"][2] for index in core_indices])))
+        all_indices = sorted(core_indices + attachments[component_index])
+        ids = np.concatenate([models[index]["ids"] for index in all_indices])
+        errors = np.concatenate([models[index]["errors"] for index in all_indices])
+        merged.append(
+            {
+                "center": center,
+                "basis": np.stack((axis, cross_axis, normal), axis=1),
+                "scales": np.asarray(scales),
+                "radiance": np.median([models[index]["radiance"] for index in core_indices], axis=0),
+                "ids": ids,
+                "errors": errors,
+                "parallax": max(models[index]["parallax"] for index in all_indices),
+                "quality": {
+                    "method": "merged_collinear_fragments",
+                    "fragment_count": len(all_indices),
+                    "core_fragment_count": len(core_indices),
+                    "source_fragment_ids": all_indices,
+                },
+            }
+        )
+        merge_records.append(
+            {
+                "source_fragment_ids": all_indices,
+                "core_fragment_ids": core_indices,
+            }
+        )
+
+    merged.extend(models[index] for index in range(len(models)) if index not in assigned)
+    return merged, merge_records
+
+
 def seed_emitters_from_hdr_multiview(
     frames,
     bounds,
@@ -418,6 +590,7 @@ def seed_emitters_from_hdr_multiview(
     min_scale_fraction=0.002,
     max_emitters=16,
     representation="planar_ellipse_2d",
+    merge_collinear_fragments=True,
     progress=None,
 ):
     if (
@@ -531,11 +704,16 @@ def seed_emitters_from_hdr_multiview(
             break
         if not accepted:
             break
+    if not models:
+        raise ValueError("No HDR emitter passed multi-view pose/support validation; no arbitrary fallback")
+    raw_model_count = len(models)
+    merge_records = []
+    if merge_collinear_fragments:
+        models, merge_records = _merge_collinear_fragments(models, diagonal)
+        report(f"merged collinear HDR fragments: {raw_model_count} candidates -> {len(models)} emitters")
     report(
         f"finished: emitters={len(models)}, shape fits={shape_fits}, duplicate seeds skipped={duplicate_skips}"
     )
-    if not models:
-        raise ValueError("No HDR emitter passed multi-view pose/support validation; no arbitrary fallback")
 
     def tensor(values):
         return torch.tensor(np.asarray(values), dtype=torch.float32)
@@ -561,11 +739,15 @@ def seed_emitters_from_hdr_multiview(
         "duplicate_hypotheses_skipped": duplicate_skips,
         "unique_shape_fits": shape_fits,
         "score_passes": score_passes,
+        "raw_emitter_fragments": raw_model_count,
+        "collinear_fragment_merge_enabled": bool(merge_collinear_fragments),
+        "collinear_fragment_merges": merge_records,
         "elapsed_seconds": time.monotonic() - started,
         "emitter_count": len(models),
         "emitters": [],
     }
     for i, m in enumerate(models):
+        distinct_views = len({observations[k].view for k in m["ids"]})
         diagnostic["emitters"].append(
             {
                 "id": i,
@@ -573,7 +755,8 @@ def seed_emitters_from_hdr_multiview(
                 "scales": m["scales"].tolist(),
                 "normal": m["basis"][:, 2].tolist(),
                 "radiance": m["radiance"].tolist(),
-                "views": len(m["ids"]),
+                "views": distinct_views,
+                "observation_count": len(m["ids"]),
                 "reprojection_median_px": float(np.median(m["errors"])),
                 "reprojection_max_px": float(m["errors"].max()),
                 "parallax_max_deg": m["parallax"],

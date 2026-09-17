@@ -5,7 +5,12 @@ import pytest
 import torch
 from PIL import Image, ImageDraw
 
-from aegir.hdr_triangulation import detect_observations, project, seed_emitters_from_hdr_multiview
+from aegir.hdr_triangulation import (
+    _merge_collinear_fragments,
+    detect_observations,
+    project,
+    seed_emitters_from_hdr_multiview,
+)
 
 
 def make_frames(ellipse=False, count=8):
@@ -106,6 +111,74 @@ def test_ellipse_uses_multi_view_silhouettes_for_plane():
     assert np.linalg.norm(emitters.centers.detach().numpy()[0] - [0.0, 0.0, 2.0]) < 0.05
     assert abs(diag["emitters"][0]["normal"][2]) > 0.97
     assert diag["emitters"][0]["method"] == "multi_view_silhouette_moments"
+
+
+def test_collinear_hdr_fragments_merge_into_physical_strips_without_known_count():
+    axis = np.array([1.0, 0.0, 0.0])
+    cross = np.array([0.0, 0.0, 1.0])
+    normal = np.array([0.0, 1.0, 0.0])
+    basis = np.stack((axis, cross, normal), axis=1)
+    models = []
+    fragment = 0
+    for offset in (-1.5, 1.5):
+        for along in (-2.0, 0.0, 2.0):
+            models.append(
+                {
+                    "center": np.array([along, 3.0, offset]),
+                    "basis": basis.copy(),
+                    "scales": np.array([1.05, 0.15, 0.03]),
+                    "radiance": np.full(3, 10.0 + fragment),
+                    "ids": np.array([fragment]),
+                    "errors": np.array([0.5]),
+                    "parallax": 20.0,
+                    "quality": {},
+                }
+            )
+            fragment += 1
+    # Compact hotspots on the first strip are absorbed without widening it.
+    models.append(
+        {
+            "center": np.array([1.0, 3.0, -1.75]),
+            "basis": basis.copy(),
+            "scales": np.array([0.12, 0.10, 0.03]),
+            "radiance": np.full(3, 20.0),
+            "ids": np.array([fragment]),
+            "errors": np.array([0.4]),
+            "parallax": 15.0,
+            "quality": {},
+        }
+    )
+
+    merged, records = _merge_collinear_fragments(models, diagonal=10.0)
+
+    assert len(merged) == 2
+    assert len(records) == 2
+    assert sorted(model["quality"]["fragment_count"] for model in merged) == [3, 4]
+    assert all(model["quality"]["method"] == "merged_collinear_fragments" for model in merged)
+    assert all(model["scales"][0] == pytest.approx(3.05) for model in merged)
+    assert all(model["scales"][1] == pytest.approx(0.15) for model in merged)
+
+
+def test_compact_independent_emitters_are_not_fragment_merged():
+    basis = np.eye(3)
+    models = [
+        {
+            "center": np.array([float(index), 0.0, 2.0]),
+            "basis": basis.copy(),
+            "scales": np.array([0.3, 0.2]),
+            "radiance": np.ones(3),
+            "ids": np.array([index]),
+            "errors": np.array([0.5]),
+            "parallax": 10.0,
+            "quality": {},
+        }
+        for index in range(6)
+    ]
+
+    merged, records = _merge_collinear_fragments(models, diagonal=10.0)
+
+    assert merged is models
+    assert records == []
 
 
 def test_rejected_final_center_is_fitted_once_for_duplicate_correspondences(monkeypatch):

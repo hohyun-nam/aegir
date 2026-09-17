@@ -129,6 +129,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="smoothly ramp white-light weight from zero until this step; 0 keeps it fixed",
     )
     train.add_argument("--emitter-initialization", choices=("hdr_multiview", "hdr_predicted_depth", "hdr_gbuffer", "gt_mask_depth"), default="hdr_multiview", help="GT mask/depth initialization requires explicit diagnostic opt-in")
+    train.add_argument(
+        "--no-merge-collinear-emitter-fragments",
+        action="store_true",
+        help="keep disconnected HDR pieces as separate emitter candidates",
+    )
     train.add_argument("--checkpoint-every", type=int, default=5_000)
     train.add_argument("--num-brdf-samples", type=int, default=128)
     train.add_argument("--num-light-samples", type=int, default=128)
@@ -339,6 +344,9 @@ def main() -> None:
         config.training.emitter_final_lr = args.emitter_final_lr
         config.training.emitter_representation = args.emitter_representation
         config.training.emitter_initialization = args.emitter_initialization
+        config.training.merge_collinear_emitter_fragments = (
+            not args.no_merge_collinear_emitter_fragments
+        )
         config.training.optimize_emitter_centers = args.optimize_emitter_centers
         config.training.optimize_emitter_rotations = args.optimize_emitter_rotations
         config.training.optimize_emitter_scales = not args.freeze_emitter_scales

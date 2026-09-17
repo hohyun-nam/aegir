@@ -792,8 +792,9 @@ Blender practical run `blender_practical3d_20260915_051804`는 native2DGS20K/exp
   scale은 native 2DGS 초기값의 `0.9–1.1배`로 clamp한다. 이 초기 scale anchor는
   exact-resume state에도 저장한다.
 - `scripts/run_conference_scale_only_geometry_ablation.sh`는 최신 practical Conference
-  geometry/data에서 secondary-only 128/1 학습과 128/8 30-view inspect를 수행한다.
-  완료 후 기존 frozen-geometry 20K 결과와 같은 frame/seed/target/mask인지 검사하고
+  geometry/data에서 geometry-fixed와 scale-only를 각각 secondary-only 128/1로 새로
+  학습하고 128/8 30-view inspect를 수행한다. 두 결과의
+  frame/seed/target/mask와 emitter 개수가 같은지 검사하고
   `scripts/compose_geometry_scale_comparison.py`로 GT/fixed/scale-only/difference 비교
   이미지, contact sheet, GIF, metrics JSON을 생성한다.
 - 이 실험은 Gaussian 수를 바꾸지 않는다. 따라서 결과 차이는 densification이나
@@ -804,7 +805,32 @@ Blender practical run `blender_practical3d_20260915_051804`는 native2DGS20K/exp
   전체 suite의 OptiX tracer 구간은 이 서버의 `surfel_tracer.RayTracer` 생성 중 native
   segfault로 중단되어 별도 GPU runtime 검증 대상으로 남겼다.
 
-### G. 아직 고치지 않은 문제와 계획
+### G. 2026-09-17 — Conference 13개 과분할을 실제 두 스트립으로 교정
+
+- Conference의 물리 조명은 두 개의 긴 천장 스트립이다. 기존 `hdr_multiview`가 만든
+  13개는 실제13개 조명이 아니라 각 스트립의 불연속 HDR 밝은 영역을 별도 면으로
+  피팅한 과분할이었다. 따라서
+  `outputs/conference_practical3d_hdrmv_20260915/aegir/aegir_20k.pt`와 이를 기준으로
+  시작한 scale-only 실험은 올바른 비교 기준에서 제외한다.
+- 원시 후보를 모두 GT/depth 없이 복원한 뒤, 길쭉하고 방향이15도 이내이며 같은
+  직선·평면에서 연속되는 support만 병합한다. 알려진 emitter 개수를 입력하거나
+  Conference에만 맞춘2개 강제 제한은 사용하지 않는다. 작은 독립 패널6개는 그대로
+  유지되는 회귀 테스트를 추가했다.
+- 실제 Conference191-view 사전검사에서 원시13개 후보가 두 에미터로 병합됐다.
+  결과와 투영 overlay는
+  `outputs/conference_practical3d_hdrmv_20260915/emitter_init_hdr_multiview_merged_v3/`에
+  저장했다. 초록 support가 두 긴 스트립을 따라가는 것을 확인했다.
+- 비교 runner는 같은 교정 초기화에서 geometry-fixed와 scale-only를 모두 새로
+  학습한다. 둘 다 emitter center/rotation과 adaptive split/prune은 고정하고 emitter
+  scale, shared color, signed-axis gains, spread, falloff는20K까지 학습한다. emitter LR은
+  0–5K `1e-3`, 5–15K `1e-4`까지 감쇠, 15–20K `1e-4`다. 배경 BRDF는15K부터
+  고정되지만 emitter 학습은 계속된다.
+- 실제 Conference preflight는 원시13개를2개로 병합하고 두 에미터가 각각38/40개의
+  서로 다른 뷰에서 지지됨을 확인했다. 실제 Blender120-view는 병합 전후 모두6개이고
+  중심·크기·재투영 수치도 유지됐다. targeted68 tests, OptiX tracer를 제외한 전체
+  140 tests, Ruff와 shell syntax 검사를 통과했다.
+
+### H. 아직 고치지 않은 문제와 계획
 
 - Native IRGS의 opacity-composited expected hit는 strict discrete first surface hit가 아니다.
 - Secondary NEE의 PDF surrogate bias는 sample 수를 늘려도 없어지지 않는다.
@@ -814,7 +840,7 @@ Blender practical run `blender_practical3d_20260915_051804`는 native2DGS20K/exp
   적응 및 localization feature/pose pipeline은 이 기록만으로 수정 완료라고 하지 않는다.
 - 인터랙티브 preview/release full-render 설계와 localization을 논의했지만 구현하지 않았다.
 
-### H. Git 전체 커밋 색인
+### I. Git 전체 커밋 색인
 
 아래는 이 저장소 baseline 이후 모든 기존 커밋을 빠짐없이 나열한다. 운영/문서/평가
 커밋도 포함하며 각 행을 새 학습 수식 변경으로 취급하지 않는다. 9월 15일 practical

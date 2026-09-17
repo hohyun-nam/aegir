@@ -10,11 +10,11 @@
 | Seed | 예측 depth + 카메라 + valid mask | train 선택 유지, stride4, voxel0.10m, 0.1–15m, emitter dilation2 제외 |
 | Geometry view | RGB/pose + 예측 depth + seed | valid255 / invalid0 / emitter-exempt64 |
 | 2DGS | 예측 depth 및 RGB 감독 | 20K, Pearson0.2, invalid0.02, 보호폭7px, dist0, densify10K/0.0005 |
-| Emitters | HDR 밝은 영역 + 다중 뷰 카메라 | 삼각측량/재투영 검증, 영상 경계로 방향·면적 복원, GT/예측-depth 조명 위치 사용 없음 |
+| Emitters | HDR 밝은 영역 + 다중 뷰 카메라 | 삼각측량/재투영 검증, 영상 경계로 방향·면적 복원, 동일한 긴 조명의 공선 조각 병합, GT/예측-depth 조명 위치 사용 없음 |
 | AEGIR | 고정 배경 + 예측 재질 priors + 관측 이미지 | 20K, SH-DC, white0, secondary-only128/1 |
 | Inspect | 학습 결과 + 기존 관측 이미지 | 128/8, SH proxy off, denoiser 기본 off/비교, 알베도 비교 |
 
-에미터 초기화 기본값은 `hdr_multiview`다. 최소3뷰(기본 train 뷰의5%)와 최대3px 재투영 오차, 최소3도 시차 및 면적/방향 복원을 요구한다. 후보가 하나도 검증되지 않으면 오류로 멈추며 임의/GT/depth 조명 fallback을 하지 않는다. 예측 depth는 배경 seed와 2DGS 감독에 사용한다. 자세한 알고리즘과 초기화 inspect 명령은 [HDR_MULTIVIEW_EMITTER_INITIALIZATION.md](HDR_MULTIVIEW_EMITTER_INITIALIZATION.md)에 있다.
+에미터 초기화 기본값은 `hdr_multiview`다. 최소3뷰(기본 train 뷰의5%)와 최대3px 재투영 오차, 최소3도 시차 및 면적/방향 복원을 요구한다. 길고 같은 선상에 있는 조명이 밝기 단절로 여러 후보가 되면 최종3D support를 병합한다. 후보가 하나도 검증되지 않으면 오류로 멈추며 임의/GT/depth 조명 fallback을 하지 않는다. 예측 depth는 배경 seed와 2DGS 감독에 사용한다. 자세한 알고리즘과 초기화 inspect 명령은 [HDR_MULTIVIEW_EMITTER_INITIALIZATION.md](HDR_MULTIVIEW_EMITTER_INITIALIZATION.md)에 있다.
 
 예측 depth는 모델 추정치다. 카메라 translation 좌표와 미터 단위가 호환되어야 하며, Pearson loss가 scale 오류나 조명 표면의 depth 추정 오류를 자동으로 고쳐 주지는 않는다. emitter pose 고정과 초기 scale 이하 제약은 기존 사용자 설정이므로 유지했다.
 

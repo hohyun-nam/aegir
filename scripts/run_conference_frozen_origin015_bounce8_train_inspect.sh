@@ -45,6 +45,7 @@ EMITTER_ADAPTATION="${EMITTER_ADAPTATION:-0}"
 EMITTER_REPRESENTATION="${EMITTER_REPRESENTATION:-planar_ellipse_2d}"
 EMITTER_INITIALIZATION="${EMITTER_INITIALIZATION:-hdr_multiview}"
 EMITTER_PERSISTENCE_RADIUS_FRACTION="${EMITTER_PERSISTENCE_RADIUS_FRACTION:-0.01}"
+MERGE_COLLINEAR_EMITTER_FRAGMENTS="${MERGE_COLLINEAR_EMITTER_FRAGMENTS:-1}"
 CHECKPOINT="$OUTPUT_ROOT/aegir_20k.pt"
 INSPECT_ROOT="$OUTPUT_ROOT/inspect_compare30"
 LOG="$OUTPUT_ROOT/train_inspect.log"
@@ -95,7 +96,7 @@ if [[ "$EMITTER_REPRESENTATION" != "planar_ellipse_2d" && "$EMITTER_REPRESENTATI
   echo "EMITTER_REPRESENTATION must be planar_ellipse_2d or ellipsoid_3d" >&2
   exit 1
 fi
-for flag in OPTIMIZE_SCENE_MEANS OPTIMIZE_SCENE_SCALES OPTIMIZE_SCENE_ROTATIONS OPTIMIZE_SCENE_OPACITIES CONSTRAIN_SCENE_SCALES OPTIMIZE_EMITTER_CENTERS OPTIMIZE_EMITTER_ROTATIONS OPTIMIZE_EMITTER_SCALES CONSTRAIN_EMITTER_SCALES EMITTER_ADAPTATION; do
+for flag in OPTIMIZE_SCENE_MEANS OPTIMIZE_SCENE_SCALES OPTIMIZE_SCENE_ROTATIONS OPTIMIZE_SCENE_OPACITIES CONSTRAIN_SCENE_SCALES OPTIMIZE_EMITTER_CENTERS OPTIMIZE_EMITTER_ROTATIONS OPTIMIZE_EMITTER_SCALES CONSTRAIN_EMITTER_SCALES EMITTER_ADAPTATION MERGE_COLLINEAR_EMITTER_FRAGMENTS; do
   if [[ "${!flag}" != "0" && "${!flag}" != "1" ]]; then
     echo "$flag must be 0 or 1" >&2
     exit 1
@@ -124,6 +125,7 @@ export OPTIMIZE_EMITTER_CENTERS OPTIMIZE_EMITTER_ROTATIONS OPTIMIZE_EMITTER_SCAL
 export CONSTRAIN_EMITTER_SCALES EMITTER_SCALE_MIN_RATIO EMITTER_SCALE_MAX_RATIO
 export EMITTER_ADAPTATION
 export EMITTER_REPRESENTATION EMITTER_INITIALIZATION EMITTER_PERSISTENCE_RADIUS_FRACTION
+export MERGE_COLLINEAR_EMITTER_FRAGMENTS
 
 mkdir -p "$OUTPUT_ROOT" "$CUDA_STUBS" "$TORCH_EXTENSIONS_DIR"
 exec > >(tee -a "$LOG") 2>&1
@@ -134,7 +136,7 @@ echo "geometry: $GEOMETRY"
 echo "checkpoint: $CHECKPOINT"
 echo "geometry_lr=$GEOMETRY_LR scene_culling=$SCENE_CULLING raster_size=$RASTER_SIZE origin_offset=0.15 bounce_samples=$BOUNCE_SAMPLES bounce_chunk_size=$BOUNCE_CHUNK_SIZE albedo_initialization=$ALBEDO_INITIALIZATION neutral_albedo=$NEUTRAL_ALBEDO albedo_lr=$ALBEDO_LR six_axis_emission=$SIX_AXIS_EMISSION axis_lobe_sharpness=$EMITTER_AXIS_LOBE_SHARPNESS"
 echo "scene_geometry means=$OPTIMIZE_SCENE_MEANS scales=$OPTIMIZE_SCENE_SCALES rotations=$OPTIMIZE_SCENE_ROTATIONS opacities=$OPTIMIZE_SCENE_OPACITIES scale_constraint=$CONSTRAIN_SCENE_SCALES scale_ratio=[$SCENE_SCALE_MIN_RATIO,$SCENE_SCALE_MAX_RATIO]"
-echo "emitter_representation=$EMITTER_REPRESENTATION emitter_centers_trainable=$OPTIMIZE_EMITTER_CENTERS emitter_rotations_trainable=$OPTIMIZE_EMITTER_ROTATIONS emitter_scales_trainable=$OPTIMIZE_EMITTER_SCALES emitter_scale_constraint=$CONSTRAIN_EMITTER_SCALES scale_ratio=[$EMITTER_SCALE_MIN_RATIO,$EMITTER_SCALE_MAX_RATIO] emitter_adaptation=$EMITTER_ADAPTATION"
+echo "emitter_representation=$EMITTER_REPRESENTATION emitter_initialization=$EMITTER_INITIALIZATION merge_collinear_fragments=$MERGE_COLLINEAR_EMITTER_FRAGMENTS emitter_centers_trainable=$OPTIMIZE_EMITTER_CENTERS emitter_rotations_trainable=$OPTIMIZE_EMITTER_ROTATIONS emitter_scales_trainable=$OPTIMIZE_EMITTER_SCALES emitter_scale_constraint=$CONSTRAIN_EMITTER_SCALES scale_ratio=[$EMITTER_SCALE_MIN_RATIO,$EMITTER_SCALE_MAX_RATIO] emitter_adaptation=$EMITTER_ADAPTATION"
 echo "training_transport_mode=$TRAINING_TRANSPORT_MODE sh_fade=[$SH_FADE_START,$SH_FADE_END] material_freeze=15000 light_white_target=$LIGHT_WHITE light_white_ramp_end=$LIGHT_WHITE_RAMP_END"
 
 verified=$("$PYTHON" scripts/check_training_provenance.py --stage aegir --action begin --data "$DATA" --geometry "$GEOMETRY" --priors "$PRIORS" --output "$CHECKPOINT")
@@ -185,6 +187,7 @@ config.training.emitter_final_lr = 1.0e-4
 config.training.emitter_representation = os.environ["EMITTER_REPRESENTATION"]
 config.training.emitter_initialization = os.environ["EMITTER_INITIALIZATION"]
 config.training.emitter_persistence_radius_fraction = float(os.environ["EMITTER_PERSISTENCE_RADIUS_FRACTION"])
+config.training.merge_collinear_emitter_fragments = os.environ["MERGE_COLLINEAR_EMITTER_FRAGMENTS"] == "1"
 config.training.optimize_emitter_centers = os.environ["OPTIMIZE_EMITTER_CENTERS"] == "1"
 config.training.optimize_emitter_rotations = os.environ["OPTIMIZE_EMITTER_ROTATIONS"] == "1"
 config.training.optimize_emitter_scales = os.environ["OPTIMIZE_EMITTER_SCALES"] == "1"

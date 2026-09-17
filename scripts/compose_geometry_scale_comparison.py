@@ -63,6 +63,12 @@ def main() -> None:
         != Path(scale_payload["source_dnsplatter_checkpoint"]).resolve()
     ):
         raise ValueError("checkpoints use different 2DGS geometry sources")
+    frozen_emitters = frozen_payload["emitter_state"]["centers"].shape[0]
+    scale_emitters = scale_payload["emitter_state"]["centers"].shape[0]
+    if frozen_emitters != scale_emitters:
+        raise ValueError(
+            f"checkpoints use different emitter counts ({frozen_emitters} != {scale_emitters})"
+        )
 
     for key in ("views", "split"):
         if frozen_metrics[key] != scale_metrics[key]:

@@ -158,6 +158,9 @@ class TrainingConfig:
     # Keep the PCA seed floor small enough to retain thin light fixtures.
     # This is a radius fraction of the scene-bounds diagonal.
     emitter_min_scale_fraction: float = 0.002
+    # Long HDR fixtures may be observed as disconnected bright pieces. Merge
+    # aligned, coplanar, contiguous 3D pieces without assuming a known count.
+    merge_collinear_emitter_fragments: bool = True
     grad_clip: float = 1.0
     checkpoint_every: int = 1_000
 
