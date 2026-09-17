@@ -227,6 +227,7 @@ def refine_scene_gaussians(
         setattr(scene, name, nn.Parameter(refined.clone()))
 
     scene.training_sh_coeffs = scene.training_sh_coeffs.detach()[new_to_old].clone()
+    scene.emitter_ids = scene.emitter_ids.detach()[new_to_old].clone()
     old_initial_means = scene.initial_means.detach()
     scene.initial_means = torch.cat(
         (

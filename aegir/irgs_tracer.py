@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import torch
@@ -71,6 +72,7 @@ class IRGSVisibilityTracer:
         config: RenderConfig,
         *,
         scene_scale: float,
+        excluded_emitter_ids: Sequence[int] | Tensor | None = None,
     ) -> None:
         if scene.means.device.type != "cuda":
             raise RuntimeError("IRGS visibility tracing requires the Gaussian scene on CUDA")
@@ -85,6 +87,7 @@ class IRGSVisibilityTracer:
         self.scene = scene
         self.alpha_min = float(config.trace_alpha_min)
         self.scene_scale = float(scene_scale)
+        self.excluded_emitter_ids = excluded_emitter_ids
         self.visibility_bias, self.steepness = resolve_visibility_parameters(config, scene_scale)
         self.origin_offset = float(config.trace_origin_offset)
         self.proxy_thickness = self.scene_scale * _BVH_PROXY_THICKNESS_FRACTION
@@ -212,7 +215,18 @@ class IRGSVisibilityTracer:
     @torch.no_grad()
     def _bounding_mesh(self) -> tuple[Tensor, Tensor, Tensor]:
         opacities = self.scene.opacities.flatten()
-        active_ids = torch.nonzero(opacities > self.alpha_min, as_tuple=False).flatten()
+        if hasattr(self.scene, "render_mask"):
+            background_mask = self.scene.render_mask(self.excluded_emitter_ids)
+        else:
+            background_mask = getattr(
+                self.scene,
+                "background_mask",
+                torch.ones_like(opacities, dtype=torch.bool),
+            )
+        active_ids = torch.nonzero(
+            (opacities > self.alpha_min) & background_mask,
+            as_tuple=False,
+        ).flatten()
         if active_ids.numel() == 0:
             empty_vertices = self.scene.means.new_empty((0, 3))
             empty_faces = torch.empty((0, 3), device=self.scene.means.device, dtype=torch.long)

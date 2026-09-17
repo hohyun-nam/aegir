@@ -26,6 +26,7 @@ from .emitters import AreaEmitterModel
 from .gaussian_scene import GaussianMaterialBackend
 from .hdr_triangulation import seed_emitters_from_hdr_multiview
 from .initialization import (
+    associate_gaussians_with_emitters,
     restore_ellipsoid_support,
     seed_emitters_from_gbuffer_views,
     seed_emitters_from_predicted_depth,
@@ -40,7 +41,13 @@ from .losses import (
     material_prior_loss,
     photometric_loss,
 )
-from .provenance import training_inputs, validate_practical_geometry, validate_predicted_depth, write_json
+from .provenance import (
+    training_inputs,
+    validate_emitter_inclusive_geometry,
+    validate_practical_geometry,
+    validate_predicted_depth,
+    write_json,
+)
 from .render import DeferredRenderer
 from .scene_culling import migrate_refined_adam, refine_scene_gaussians, should_refine_scene
 from .visibility import scene_scale_from_bounds
@@ -300,6 +307,7 @@ def initialize_emitters(
             camera,
             alpha_threshold=config.raster.alpha_threshold,
             rasterize_mode=config.raster.rasterize_mode,
+            include_emitter_gaussians=True,
         )
         targets.append(frame.target.cpu())
         # Screen-space placeholders are only needed transiently to collect
@@ -330,8 +338,26 @@ def initialize_emitters(
         persistence_min_views=config.training.emitter_persistence_min_views,
         persistence_min_fraction=config.training.emitter_persistence_min_fraction,
         persistence_voxel_fraction=config.training.emitter_persistence_voxel_fraction,
+        allow_fallback=False,
     )
-    return apply_representation(emitters).to(device)
+    emitters = apply_representation(emitters).to(device)
+    state = emitters.state()
+    dataset.emitter_initialization_diagnostic = {
+        "method": "hdr_gbuffer_dbscan_pca",
+        "uses_gt_emitters": False,
+        "uses_dataset_emitter_masks": False,
+        "view_count": len(dataset.frames),
+        "emitter_count": emitters.num_emitters,
+        "quantile": config.training.emitter_init_quantile,
+        "persistence_min_views": config.training.emitter_persistence_min_views,
+        "persistence_min_fraction": config.training.emitter_persistence_min_fraction,
+        "persistence_voxel_fraction": config.training.emitter_persistence_voxel_fraction,
+        "centers": state.centers.cpu().tolist(),
+        "quaternions": state.quaternions.cpu().tolist(),
+        "scales": state.scales.cpu().tolist(),
+        "colors": state.colors.cpu().tolist(),
+    }
+    return emitters
 
 
 class SharedGaussianTrainer:
@@ -499,11 +525,19 @@ class SharedGaussianTrainer:
             )
             self._accumulate_scene_culling_stats(full_gbuffer)
             gaussian_valid = full_gbuffer["valid_mask"].bool()
-            emitter_pixels = (
+            dataset_emitter_pixels = (
                 frame.emitter_mask.to(self.device)
-                if frame.emitter_mask is not None
+                if (
+                    frame.emitter_mask is not None
+                    and not self.config.training.associate_emitter_gaussians
+                )
                 else torch.zeros_like(mask)
             )
+            _, analytic_emitter_pixels = self.renderer.camera_visible_emission(
+                full_gbuffer,
+                self.emitters,
+            )
+            emitter_pixels = dataset_emitter_pixels | (analytic_emitter_pixels > 0.5)
             # Analytic emission remains photometrically supervised even when
             # native 2DGS intentionally has no Gaussian at that pixel. Scene
             # material/TV losses exclude it so geometry cannot grow back into
@@ -919,6 +953,11 @@ class SharedGaussianTrainer:
                 "input_provenance": getattr(self.dataset, "training_input_provenance", None),
                 "depth_provenance": self.dataset.metadata.get("aegir_depth_provenance"),
                 "emitter_initialization_diagnostic": getattr(self.dataset, "emitter_initialization_diagnostic", None),
+                "emitter_gaussian_association": getattr(
+                    self.dataset,
+                    "emitter_gaussian_association_diagnostic",
+                    None,
+                ),
             },
             initial_emitter_state=self.initial_emitter_state,
             training_state=self._capture_training_state(step),
@@ -1034,9 +1073,22 @@ def train_shared_gaussians(
     max_views: int | None = None,
     max_gaussians: int | None = None,
 ) -> None:
-    if config.training.emitter_initialization in {"hdr_multiview", "hdr_predicted_depth"}:
+    if config.training.associate_emitter_gaussians:
+        if config.adaptive.enabled:
+            raise ValueError(
+                "Emitter Gaussian association requires fixed emitter identity; "
+                "disable emitter adaptation"
+            )
+        if config.training.optimize_emitter_centers or config.training.optimize_emitter_rotations:
+            raise ValueError(
+                "Emitter Gaussian association requires fixed emitter centers/rotations"
+            )
+    if config.training.emitter_initialization in {"hdr_multiview", "hdr_predicted_depth", "hdr_gbuffer"}:
         validate_predicted_depth(Path(nerfstudio_dir))
-        validate_practical_geometry(Path(dnsplatter_checkpoint))
+        if config.training.emitter_initialization == "hdr_gbuffer":
+            validate_emitter_inclusive_geometry(Path(dnsplatter_checkpoint))
+        else:
+            validate_practical_geometry(Path(dnsplatter_checkpoint))
         if emitter_checkpoint is not None:
             raise ValueError("Practical fresh training must initialize emitters from HDR, not a warm-start checkpoint")
     dataset = MultiViewSceneDataset(
@@ -1061,9 +1113,31 @@ def train_shared_gaussians(
         emitters = initialize_emitters(scene, dataset, bounds, config, device)
     else:
         emitters = load_legacy_emitters(emitter_checkpoint, device)
+    if config.training.associate_emitter_gaussians:
+        association = associate_gaussians_with_emitters(
+            scene,
+            emitters,
+            bounds,
+            tangent_margin=config.training.emitter_gaussian_tangent_margin,
+            normal_fraction=config.training.emitter_gaussian_normal_fraction,
+        )
+        dataset.emitter_gaussian_association_diagnostic = association
+        print(
+            "emitter Gaussian association: "
+            f"tagged={association['tagged']} counts={association['counts']}",
+            flush=True,
+        )
     if getattr(dataset, "emitter_initialization_diagnostic", None) is not None:
         write_json(Path(output_path).parent / "emitter_initialization.json", dataset.emitter_initialization_diagnostic)
+    if getattr(dataset, "emitter_gaussian_association_diagnostic", None) is not None:
+        write_json(
+            Path(output_path).parent / "emitter_gaussian_association.json",
+            dataset.emitter_gaussian_association_diagnostic,
+        )
     trainer = SharedGaussianTrainer(scene, dataset, emitters, config, output_path, device)
+    initialization_checkpoint = Path(output_path).parent / "aegir_initialization.pt"
+    trainer._save(0, initialization_checkpoint)
+    print(f"initialization checkpoint: {initialization_checkpoint}", flush=True)
     trainer.fit()
 
 

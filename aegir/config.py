@@ -86,7 +86,9 @@ class ColorConfig:
 
 @dataclass(slots=True)
 class TrainingConfig:
-    steps: int = 20_000
+    # Current fixed-geometry experiments saturate by 5K. Longer schedules are
+    # explicit ablations rather than the default while that issue is studied.
+    steps: int = 5_000
     geometry_lr: float = 1.0e-5
     # Geometry tensors share one optimizer, but ablations may isolate which
     # 2DGS property receives gradients.  All remain enabled by default to
@@ -161,6 +163,12 @@ class TrainingConfig:
     # Long HDR fixtures may be observed as disconnected bright pieces. Merge
     # aligned, coplanar, contiguous 3D pieces without assuming a known count.
     merge_collinear_emitter_fragments: bool = True
+    # Keep one emitter-inclusive 2DGS reconstruction, then tag source surfels
+    # occupying analytic emitter supports so they can be omitted from ordinary
+    # BRDF rasterization and IRGS transport without deleting checkpoint rows.
+    associate_emitter_gaussians: bool = True
+    emitter_gaussian_tangent_margin: float = 1.05
+    emitter_gaussian_normal_fraction: float = 0.001
     grad_clip: float = 1.0
     checkpoint_every: int = 1_000
 
@@ -223,6 +231,9 @@ def config_from_dict(payload: dict[str, Any]) -> AEGIRConfig:
     if legacy_scene_culling:
         scene_culling_values = {"enabled": False}
     training_values = dict(payload.get("training", {}))
+    # Pre-v16 checkpoints have no semantic emitter/source-Gaussian IDs. Keep
+    # their original all-scene raster/trace behavior during inspect/resume.
+    training_values.setdefault("associate_emitter_gaussians", False)
     # Old checkpoints coupled the SH fade to the material freeze schedule.
     training_values.setdefault("sh_fade_start", training_values.get("freeze_start", 5_000))
     training_values.setdefault("sh_fade_end", training_values.get("freeze_end", 15_000))

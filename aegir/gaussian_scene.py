@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -165,6 +166,15 @@ class GaussianMaterialBackend(nn.Module):
         # secondary-bounce proxy described in AEGIR Section 3.3. It is never
         # part of the inference transport path.
         self.register_buffer("training_sh_coeffs", training_sh.clone())
+        # -1 denotes ordinary scene geometry. Non-negative values associate a
+        # source 2DGS surfel with one analytic emitter.  The rows stay in the
+        # checkpoint so a single emitter-inclusive 2DGS reconstruction is
+        # sufficient, while normal AEGIR rasterization and ray tracing can
+        # remove duplicate luminous geometry.
+        self.register_buffer(
+            "emitter_ids",
+            torch.full((means.shape[0],), -1, dtype=torch.long, device=means.device),
+        )
         self.register_buffer("initial_means", means.clone(), persistent=False)
 
     @classmethod
@@ -188,6 +198,10 @@ class GaussianMaterialBackend(nn.Module):
             state["training_sh_coeffs"] = ((legacy_color - 0.5) / SH_C0)[:, None, :]
         else:
             state.pop("sh_proxy_color", None)
+        state.setdefault(
+            "emitter_ids",
+            torch.full((state["means"].shape[0],), -1, dtype=torch.long),
+        )
         scene = cls.__new__(cls)
         nn.Module.__init__(scene)
         scene.source_checkpoint = str(source_checkpoint)
@@ -199,6 +213,7 @@ class GaussianMaterialBackend(nn.Module):
         scene.roughness_logits = nn.Parameter(torch.empty_like(state["roughness_logits"]))
         scene.metallic_logits = nn.Parameter(torch.empty_like(state["metallic_logits"]))
         scene.register_buffer("training_sh_coeffs", torch.empty_like(state["training_sh_coeffs"]))
+        scene.register_buffer("emitter_ids", torch.empty_like(state["emitter_ids"]))
         scene.register_buffer("initial_means", state["means"].clone(), persistent=False)
         scene.load_state_dict(state, strict=True)
         return scene
@@ -243,6 +258,30 @@ class GaussianMaterialBackend(nn.Module):
     def trace_material_features(self) -> Tensor:
         return torch.cat((self.albedo, self.roughness, self.metallic), dim=-1)
 
+    @property
+    def background_mask(self) -> Tensor:
+        """Rows used as ordinary BRDF geometry in AEGIR transport."""
+
+        return self.emitter_ids < 0
+
+    def render_mask(self, excluded_emitter_ids: Sequence[int] | Tensor | None = None) -> Tensor:
+        """Rows visible as BRDF geometry for a chosen active-emitter set.
+
+        ``None`` means every associated analytic emitter is active. An empty
+        sequence keeps all tagged fixture surfels for an all-lights-off view.
+        """
+
+        if excluded_emitter_ids is None:
+            return self.background_mask
+        excluded = torch.as_tensor(
+            excluded_emitter_ids,
+            device=self.emitter_ids.device,
+            dtype=self.emitter_ids.dtype,
+        ).flatten()
+        if excluded.numel() == 0:
+            return torch.ones_like(self.emitter_ids, dtype=torch.bool)
+        return ~torch.isin(self.emitter_ids, excluded)
+
     def geometry_parameters(self) -> list[nn.Parameter]:
         return [self.means, self.log_scales, self.raw_quats, self.opacity_logits]
 
@@ -267,6 +306,9 @@ class GaussianMaterialBackend(nn.Module):
         camera: dict[str, Any],
         alpha_threshold: float = 1.0e-3,
         rasterize_mode: str = "classic",
+        *,
+        include_emitter_gaussians: bool = False,
+        excluded_emitter_ids: Sequence[int] | Tensor | None = None,
     ) -> dict[str, Tensor]:
         try:
             from diff_surfel_rasterization import GaussianRasterizationSettings, GaussianRasterizer
@@ -311,16 +353,34 @@ class GaussianMaterialBackend(nn.Module):
         )
         rasterizer = GaussianRasterizer(raster_settings=settings)
 
+        active_ids = (
+            torch.arange(self.gaussian_count, device=device)
+            if include_emitter_gaussians
+            else torch.nonzero(
+                self.render_mask(excluded_emitter_ids), as_tuple=False
+            ).flatten()
+        )
+        if active_ids.numel() == 0:
+            raise ValueError("Gaussian rasterization has no active background rows")
+
         def render_attributes(attributes: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+            # Keep a full-sized leaf so geometry-gradient/refinement statistics
+            # retain their one-row-per-source-Gaussian contract.
             means2d = torch.zeros_like(self.means, requires_grad=self.means.requires_grad)
-            rendered_chw, radii, auxiliary_chw = rasterizer(
-                means3D=self.means,
-                means2D=means2d,
-                colors_precomp=attributes.contiguous(),
-                opacities=self.opacities,
-                scales=self.scales,
-                rotations=self.quats,
+            rendered_chw, active_radii, auxiliary_chw = rasterizer(
+                means3D=self.means.index_select(0, active_ids),
+                means2D=means2d.index_select(0, active_ids).contiguous(),
+                colors_precomp=attributes.index_select(0, active_ids).contiguous(),
+                opacities=self.opacities.index_select(0, active_ids),
+                scales=self.scales.index_select(0, active_ids),
+                rotations=self.quats.index_select(0, active_ids),
             )
+            radii = torch.zeros(
+                self.gaussian_count,
+                device=active_radii.device,
+                dtype=active_radii.dtype,
+            )
+            radii[active_ids] = active_radii
             return (
                 rendered_chw.permute(1, 2, 0),
                 auxiliary_chw.permute(1, 2, 0),
@@ -390,10 +450,11 @@ class GaussianMaterialBackend(nn.Module):
         }
 
     def visibility_points(self, max_points: int) -> Tensor:
-        if max_points <= 0 or self.gaussian_count <= max_points:
-            return self.means
-        ids = torch.linspace(0, self.gaussian_count - 1, max_points, device=self.means.device).round().long()
-        return self.means[ids]
+        points = self.means[self.background_mask]
+        if max_points <= 0 or points.shape[0] <= max_points:
+            return points
+        ids = torch.linspace(0, points.shape[0] - 1, max_points, device=self.means.device).round().long()
+        return points[ids]
 
     @torch.no_grad()
     def sanitize_parameters(self, bounds: tuple[Tensor, Tensor]) -> None:

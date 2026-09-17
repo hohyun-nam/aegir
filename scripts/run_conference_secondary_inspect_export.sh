@@ -17,7 +17,7 @@ BOUNCE_SAMPLES="${BOUNCE_SAMPLES:-}"
 MAX_VIEWS="${MAX_VIEWS:-30}"
 EXPORT_PLY="${EXPORT_PLY:-1}"
 SECONDARY_DIR="$OUTPUT_ROOT/inspect_secondary_bounce"
-PLY="$OUTPUT_ROOT/aegir_20k_scene_emitters.ply"
+PLY="${PLY:-$OUTPUT_ROOT/aegir_scene_emitters.ply}"
 
 for required in "$PYTHON" "$CHECKPOINT" "$DATA/transforms.json" "$PRIORS/manifest.json"; do
   if [[ ! -s "$required" ]]; then

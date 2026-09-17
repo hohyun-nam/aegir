@@ -172,6 +172,19 @@ def validate_practical_geometry(geometry: Path) -> dict:
     return stored
 
 
+def validate_emitter_inclusive_geometry(geometry: Path) -> dict:
+    """Require a practical 2DGS whose seed and losses retained emitters."""
+
+    stored = validate_practical_geometry(geometry)
+    view = stored["request"]["inputs"]["view_provenance"]["request"]
+    seed = view["inputs"]["seed_provenance"]["request"]
+    if view["settings"].get("exclude_emitters") is not False:
+        raise ValueError("Emitter association requires emitter-inclusive native 2DGS supervision")
+    if seed["settings"].get("exclude_emitter_masks") is not False:
+        raise ValueError("Emitter association requires an emitter-inclusive model-depth seed")
+    return stored
+
+
 def validate_model_depth_seed(seed: Path) -> dict:
     seed = Path(seed)
     manifest = seed.with_suffix(seed.suffix + ".provenance.json")

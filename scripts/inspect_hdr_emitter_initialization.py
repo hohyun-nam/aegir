@@ -18,9 +18,11 @@ from aegir.config import AEGIRConfig
 from aegir.data import MultiViewSceneDataset
 from aegir.gaussian_scene import GaussianMaterialBackend
 from aegir.hdr_triangulation import project
+from aegir.initialization import associate_gaussians_with_emitters
 from aegir.math_utils import quat_to_matrix
 from aegir.provenance import (
     training_inputs,
+    validate_emitter_inclusive_geometry,
     validate_practical_geometry,
     validate_predicted_depth,
     write_json,
@@ -96,19 +98,37 @@ def main():
     parser.add_argument(
         "--representation", choices=("planar_ellipse_2d", "ellipsoid_3d"), default="ellipsoid_3d"
     )
+    parser.add_argument(
+        "--initialization",
+        choices=("hdr_multiview", "hdr_gbuffer"),
+        default="hdr_multiview",
+    )
+    parser.add_argument("--device", default="cuda")
     args = parser.parse_args()
     validate_predicted_depth(args.data)
-    validate_practical_geometry(args.geometry)
+    if args.initialization == "hdr_gbuffer":
+        validate_emitter_inclusive_geometry(args.geometry)
+    else:
+        validate_practical_geometry(args.geometry)
     config = AEGIRConfig()
     config.raster.image_size = args.image_size
-    config.training.emitter_initialization = "hdr_multiview"
+    config.training.emitter_initialization = args.initialization
     config.training.emitter_representation = args.representation
     config.training.training_transport_mode = "secondary_only"
     config.losses.light_white = 0
     dataset = MultiViewSceneDataset(args.data, args.geometry, image_size=args.image_size, split="train")
-    scene = GaussianMaterialBackend(args.geometry)
-    emitters = initialize_emitters(scene, dataset, scene.bounds(config.raster.bounds_quantile), config, "cpu")
+    scene = GaussianMaterialBackend(args.geometry).to(args.device)
+    bounds = scene.bounds(config.raster.bounds_quantile)
+    emitters = initialize_emitters(scene, dataset, bounds, config, args.device)
+    association = associate_gaussians_with_emitters(
+        scene,
+        emitters,
+        bounds,
+        tangent_margin=config.training.emitter_gaussian_tangent_margin,
+        normal_fraction=config.training.emitter_gaussian_normal_fraction,
+    )
     diagnostic = dataset.emitter_initialization_diagnostic
+    diagnostic["gaussian_association"] = association
     diagnostic["input_provenance"] = training_inputs(args.data.resolve(), args.geometry.resolve(), None)
     args.output.mkdir(parents=True, exist_ok=True)
     write_json(args.output / "emitter_initialization.json", diagnostic)
@@ -133,8 +153,9 @@ def main():
         },
         initial_emitter_state=emitter_state_dict(emitters),
     )
+    saved_payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
     exported = filter_gaussians(
-        scene_from_checkpoint({"scene_state": scene.state_dict()}),
+        scene_from_checkpoint(saved_payload),
         min_opacity=0.01,
         stride=1,
         max_gaussians=500_000,
@@ -148,13 +169,18 @@ def main():
         args.output / "map_with_initial_emitters.ply",
         {key: torch.cat((exported[key], lights[key]), dim=0) for key in exported},
     )
-    write_overlays(dataset, emitters, diagnostic, args.output)
-    for light in diagnostic["emitters"]:
-        print(
-            f"emitter {light['id']}: center={light['center']} views={light['views']} "
-            f"median_error={light['reprojection_median_px']:.3f}px",
-            flush=True,
-        )
+    if args.initialization == "hdr_multiview":
+        write_overlays(dataset, emitters.cpu(), diagnostic, args.output)
+        for light in diagnostic["emitters"]:
+            print(
+                f"emitter {light['id']}: center={light['center']} views={light['views']} "
+                f"median_error={light['reprojection_median_px']:.3f}px",
+                flush=True,
+            )
+    print(
+        f"associated source Gaussians: {association['tagged']} counts={association['counts']}",
+        flush=True,
+    )
     print(f"PREFLIGHT_COMPLETE: {args.output.resolve()}", flush=True)
 
 

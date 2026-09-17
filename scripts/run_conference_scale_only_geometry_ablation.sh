@@ -63,6 +63,7 @@ run_variant() {
   EMITTER_SCALE_MIN_RATIO=0.1 \
   EMITTER_SCALE_MAX_RATIO=1.0 \
   EMITTER_ADAPTATION=0 \
+  STEPS=5000 \
   bash "$SCRIPT_DIR/run_conference_frozen_origin015_bounce8_train_inspect.sh"
 }
 
@@ -101,11 +102,11 @@ PY
 
 echo "[2/4] fresh frozen-geometry reference"
 run_variant "$FROZEN_ROOT" 0.0 0 0
-assert_two_emitters "$FROZEN_ROOT/aegir_20k.pt"
+assert_two_emitters "$FROZEN_ROOT/aegir_5k.pt"
 
 echo "[3/4] scale-only geometry ablation"
 run_variant "$SCALE_ROOT" 1e-6 1 1
-assert_two_emitters "$SCALE_ROOT/aegir_20k.pt"
+assert_two_emitters "$SCALE_ROOT/aegir_5k.pt"
 
 echo "[4/4] matched visual and metric comparison"
 "$PYTHON" "$SCRIPT_DIR/compose_geometry_scale_comparison.py" \
@@ -114,6 +115,6 @@ echo "[4/4] matched visual and metric comparison"
   --output-dir "$OUTPUT_ROOT/fixed_vs_scale_only_compare30"
 
 echo "$(date --iso-8601=seconds) COMPARISON_COMPLETE"
-echo "frozen checkpoint: $FROZEN_ROOT/aegir_20k.pt"
-echo "scale-only checkpoint: $SCALE_ROOT/aegir_20k.pt"
+echo "frozen checkpoint: $FROZEN_ROOT/aegir_5k.pt"
+echo "scale-only checkpoint: $SCALE_ROOT/aegir_5k.pt"
 echo "comparison: $OUTPUT_ROOT/fixed_vs_scale_only_compare30"

@@ -9,6 +9,72 @@ from .emitters import AreaEmitterModel
 from .math_utils import quat_to_matrix, safe_normalize
 
 
+@torch.no_grad()
+def associate_gaussians_with_emitters(
+    scene,
+    emitters: AreaEmitterModel,
+    bounds: tuple[Tensor, Tensor],
+    *,
+    tangent_margin: float = 1.05,
+    normal_fraction: float = 0.001,
+) -> dict:
+    """Associate inclusive source surfels with recovered analytic emitters.
+
+    The assignment uses only the DBSCAN/PCA support recovered from observations.
+    It does not consume dataset emitter IDs, segmentation components, or GT
+    emitter geometry. Rows outside every support retain the background ID -1.
+    """
+
+    if tangent_margin <= 0.0:
+        raise ValueError("emitter Gaussian tangent margin must be positive")
+    if normal_fraction <= 0.0:
+        raise ValueError("emitter Gaussian normal fraction must be positive")
+    if emitters.num_emitters == 0:
+        scene.emitter_ids.fill_(-1)
+        return {"method": "analytic_support", "tagged": 0, "background": scene.gaussian_count, "counts": []}
+
+    means = scene.means.detach()
+    centers = emitters.centers.detach().to(means)
+    rotations = emitters.rotations.detach().to(means)
+    scales = emitters.scales.detach().to(means)
+    scene_scale = (bounds[1] - bounds[0]).norm().to(means).clamp_min(1.0e-6)
+    normal_floor = scene_scale * float(normal_fraction)
+    relative = means[:, None, :] - centers[None, :, :]
+    local = torch.einsum("gei,eij->gej", relative, rotations)
+    tangent_denominator = (
+        scales[None, :, :2] * float(tangent_margin)
+    ).clamp_min(1.0e-6)
+    tangent_metric = (local[..., :2] / tangent_denominator).square().sum(dim=-1)
+    if scales.shape[-1] == 3:
+        normal_limit = torch.maximum(
+            scales[:, 2] * float(tangent_margin),
+            normal_floor.expand(emitters.num_emitters),
+        )
+    else:
+        normal_limit = normal_floor.expand(emitters.num_emitters)
+    normal_metric = (
+        local[..., 2].abs() / normal_limit[None].clamp_min(1.0e-6)
+    ).square()
+    metric = tangent_metric + normal_metric
+    best_metric, best_ids = metric.min(dim=1)
+    assigned = torch.where(
+        best_metric <= 1.0,
+        best_ids,
+        torch.full_like(best_ids, -1),
+    )
+    scene.emitter_ids.copy_(assigned.to(scene.emitter_ids))
+    counts = [int((assigned == index).sum().cpu()) for index in range(emitters.num_emitters)]
+    return {
+        "method": "analytic_support",
+        "tagged": int((assigned >= 0).sum().cpu()),
+        "background": int((assigned < 0).sum().cpu()),
+        "counts": counts,
+        "tangent_margin": float(tangent_margin),
+        "normal_fraction": float(normal_fraction),
+        "normal_tolerance": float(normal_floor.cpu()),
+    }
+
+
 def unproject_opengl_z_depth(depth: Tensor, camera: dict) -> Tensor:
     """Unproject OpenCV Z-depth using an OpenGL camera-to-world transform."""
 

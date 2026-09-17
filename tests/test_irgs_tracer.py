@@ -29,6 +29,7 @@ class _SingleSurfelScene(nn.Module):
         sh[:, 0] = 1.0
         sh[:, 3, 0] = 0.5
         self.register_buffer("training_sh_coeffs", sh)
+        self.register_buffer("emitter_ids", torch.full((1,), -1, device="cuda", dtype=torch.long))
 
     @property
     def gaussian_count(self) -> int:
@@ -58,6 +59,10 @@ class _SingleSurfelScene(nn.Module):
     def trace_material_features(self) -> torch.Tensor:
         return torch.tensor([[0.5, 0.4, 0.3, 0.6, 0.2]], device="cuda")
 
+    @property
+    def background_mask(self) -> torch.Tensor:
+        return self.emitter_ids < 0
+
 
 class _LayeredSurfelScene(_SingleSurfelScene):
     """Two coincident image-space surfels on opposite sides of a light."""
@@ -75,6 +80,7 @@ class _LayeredSurfelScene(_SingleSurfelScene):
             torch.logit(torch.tensor([[0.2], [0.99]], device="cuda"))
         )
         self.training_sh_coeffs = self.training_sh_coeffs.detach().repeat(2, 1, 1)
+        self.emitter_ids = self.emitter_ids.detach().repeat(2)
 
     @property
     def trace_material_features(self) -> torch.Tensor:
@@ -103,6 +109,18 @@ def test_irgs_visibility_hits_misses_and_backpropagates() -> None:
     assert scene.opacity_logits.grad is not None
     assert torch.isfinite(scene.opacity_logits.grad).all()
     assert float(scene.opacity_logits.grad.abs().max()) > 0.0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="IRGS OptiX test requires CUDA")
+def test_irgs_bvh_excludes_emitter_associated_gaussians() -> None:
+    pytest.importorskip("surfel_tracer")
+    scene = _LayeredSurfelScene()
+    scene.emitter_ids[0] = 0
+    tracer = IRGSVisibilityTracer(scene, RenderConfig(), scene_scale=3.0)
+
+    _, _, gaussian_ids = tracer._bounding_mesh()
+
+    assert gaussian_ids.unique().tolist() == [1]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="IRGS OptiX test requires CUDA")

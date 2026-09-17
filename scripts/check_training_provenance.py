@@ -11,6 +11,7 @@ from aegir.provenance import (
     dataset_signature,
     publish_artifact,
     sha256_file,
+    validate_emitter_inclusive_geometry,
     validate_native_view,
     validate_practical_geometry,
     validate_predicted_depth,
@@ -60,6 +61,7 @@ def main():
                 raise ValueError("Native 2DGS input contains forbidden GT/supervision paths")
     else:
         names = [
+            "STEPS",
             "EMITTER_INITIALIZATION",
             "EMITTER_PERSISTENCE_RADIUS_FRACTION",
             "EMITTER_REPRESENTATION",
@@ -85,9 +87,13 @@ def main():
             "EMITTER_SCALE_MAX_RATIO",
             "EMITTER_ADAPTATION",
         ]
-        if os.getenv("EMITTER_INITIALIZATION", "hdr_multiview") in {"hdr_multiview", "hdr_predicted_depth"}:
+        initialization = os.getenv("EMITTER_INITIALIZATION", "hdr_multiview")
+        if initialization in {"hdr_multiview", "hdr_predicted_depth", "hdr_gbuffer"}:
             validate_predicted_depth(args.data)
-            validate_practical_geometry(args.geometry)
+            if initialization == "hdr_gbuffer":
+                validate_emitter_inclusive_geometry(args.geometry)
+            else:
+                validate_practical_geometry(args.geometry)
     root = Path(__file__).resolve().parents[1]
     code = {str(path.relative_to(root)): sha256_file(path) for path in sorted((root / "aegir").glob("*.py"))}
     for name in (

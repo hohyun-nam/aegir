@@ -23,21 +23,27 @@ from scripts.export_supersplat_ply import filter_gaussians, write_binary_ply
 
 def scene_from_checkpoint(payload: dict) -> dict[str, torch.Tensor]:
     state = payload["scene_state"]
-    means = state["means"].float()
-    log_scales = state["log_scales"].float()
-    quats = safe_normalize(state["raw_quats"].float(), dim=-1)
+    emitter_ids = state.get("emitter_ids")
+    keep = (
+        emitter_ids.long() < 0
+        if emitter_ids is not None
+        else torch.ones(state["means"].shape[0], dtype=torch.bool)
+    )
+    means = state["means"].float()[keep]
+    log_scales = state["log_scales"].float()[keep]
+    quats = safe_normalize(state["raw_quats"].float()[keep], dim=-1)
     scales = log_scales.exp()
     if scales.shape[-1] == 3:
         quats, scales = planarize_gaussians(quats, scales)
     export_scales = surfel_scales_for_3d_export(scales).log()
-    albedo = state["albedo_logits"].float().sigmoid()
+    albedo = state["albedo_logits"].float()[keep].sigmoid()
     f_dc = (albedo - 0.5) / SH_C0
     return {
         "means": means,
         "normals": gaussian_surface_normals(quats),
         "f_dc": f_dc,
         "f_rest": torch.zeros((means.shape[0], 15, 3), dtype=torch.float32),
-        "opacity": state["opacity_logits"].float(),
+        "opacity": state["opacity_logits"].float()[keep],
         "scale": export_scales,
         "rot": quats,
     }
@@ -90,6 +96,9 @@ def main() -> None:
         if emitter_state is None:
             raise ValueError("checkpoint has no stored initial_emitter_state")
         source_scene = GaussianMaterialBackend(payload["source_dnsplatter_checkpoint"])
+        saved_ids = payload["scene_state"].get("emitter_ids")
+        if saved_ids is not None:
+            source_scene.emitter_ids.copy_(saved_ids.to(source_scene.emitter_ids))
         scene = scene_from_checkpoint({"scene_state": source_scene.state_dict()})
     else:
         emitter_state = payload["emitter_state"]
@@ -98,7 +107,8 @@ def main() -> None:
         emitters_from_state(
             emitter_state,
             "cpu",
-            preserve_3d=payload.get("format") == "aegir_shared_gaussian_v15",
+            preserve_3d=payload.get("format")
+            in {"aegir_shared_gaussian_v15", "aegir_shared_gaussian_v16"},
         )
     )
     before = scene["means"].shape[0]

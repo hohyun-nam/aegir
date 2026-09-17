@@ -14,7 +14,7 @@ from .emitters import AreaEmitterModel
 from .gaussian_scene import GaussianMaterialBackend, planarize_gaussians
 from .math_utils import matrix_to_quat, quat_to_matrix
 
-CHECKPOINT_FORMAT = "aegir_shared_gaussian_v15"
+CHECKPOINT_FORMAT = "aegir_shared_gaussian_v16"
 SUPPORTED_CHECKPOINT_FORMATS = {
     "aegir_shared_gaussian_v1",
     "aegir_shared_gaussian_v2",
@@ -30,9 +30,14 @@ SUPPORTED_CHECKPOINT_FORMATS = {
     "aegir_shared_gaussian_v12",
     "aegir_shared_gaussian_v13",
     "aegir_shared_gaussian_v14",
+    "aegir_shared_gaussian_v15",
     CHECKPOINT_FORMAT,
 }
-EXACT_RESUME_FORMATS = {"aegir_shared_gaussian_v14", CHECKPOINT_FORMAT}
+EXACT_RESUME_FORMATS = {
+    "aegir_shared_gaussian_v14",
+    "aegir_shared_gaussian_v15",
+    CHECKPOINT_FORMAT,
+}
 
 
 def emitter_state_dict(emitters: AreaEmitterModel) -> dict[str, torch.Tensor]:
@@ -106,7 +111,7 @@ def require_exact_resume_state(payload: dict[str, Any], path: str | Path | None 
     if payload.get("format") not in EXACT_RESUME_FORMATS or "training_state" not in payload:
         raise ValueError(
             f"checkpoint{location} has no exact-resume optimizer/RNG state; "
-            "only v14-v15 directional-emitter checkpoints are exactly resumable; "
+            "only v14-v16 directional-emitter checkpoints are exactly resumable; "
             "v1-v13 are inference-only or explicit warm starts"
         )
     training_state = payload["training_state"]
@@ -340,7 +345,7 @@ def load_checkpoint(
     emitters = emitters_from_state(
         payload["emitter_state"],
         device,
-        preserve_3d=payload.get("format") == CHECKPOINT_FORMAT,
+        preserve_3d=payload.get("format") in {"aegir_shared_gaussian_v15", CHECKPOINT_FORMAT},
     )
     if payload.get("format") in EXACT_RESUME_FORMATS and "emitter_raw_state" in payload:
         raw_state = dict(payload["emitter_raw_state"])

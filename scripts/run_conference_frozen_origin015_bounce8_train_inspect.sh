@@ -46,7 +46,21 @@ EMITTER_REPRESENTATION="${EMITTER_REPRESENTATION:-planar_ellipse_2d}"
 EMITTER_INITIALIZATION="${EMITTER_INITIALIZATION:-hdr_multiview}"
 EMITTER_PERSISTENCE_RADIUS_FRACTION="${EMITTER_PERSISTENCE_RADIUS_FRACTION:-0.01}"
 MERGE_COLLINEAR_EMITTER_FRAGMENTS="${MERGE_COLLINEAR_EMITTER_FRAGMENTS:-1}"
-CHECKPOINT="$OUTPUT_ROOT/aegir_20k.pt"
+STEPS="${STEPS:-5000}"
+if (( STEPS % 1000 == 0 )); then
+  STEP_LABEL="$((STEPS / 1000))k"
+else
+  STEP_LABEL="step${STEPS}"
+fi
+CHECKPOINT="${CHECKPOINT:-$OUTPUT_ROOT/aegir_${STEP_LABEL}.pt}"
+checkpoint_name=$(basename -- "$CHECKPOINT")
+if [[ "$checkpoint_name" =~ ^aegir_([0-9]+)k\.pt$ ]]; then
+  checkpoint_steps=$((10#${BASH_REMATCH[1]} * 1000))
+  if (( checkpoint_steps != STEPS )); then
+    echo "checkpoint name $checkpoint_name implies $checkpoint_steps steps, but STEPS=$STEPS" >&2
+    exit 2
+  fi
+fi
 INSPECT_ROOT="$OUTPUT_ROOT/inspect_compare30"
 LOG="$OUTPUT_ROOT/train_inspect.log"
 
@@ -102,8 +116,8 @@ for flag in OPTIMIZE_SCENE_MEANS OPTIMIZE_SCENE_SCALES OPTIMIZE_SCENE_ROTATIONS 
     exit 1
   fi
 done
-if (( RASTER_SIZE <= 0 )); then
-  echo "RASTER_SIZE must be positive" >&2
+if (( RASTER_SIZE <= 0 || STEPS <= 0 )); then
+  echo "RASTER_SIZE and STEPS must be positive" >&2
   exit 1
 fi
 if (( BOUNCE_SAMPLES <= 0 || INSPECT_BOUNCE_SAMPLES <= 0 || BOUNCE_CHUNK_SIZE <= 0 )); then
@@ -111,7 +125,7 @@ if (( BOUNCE_SAMPLES <= 0 || INSPECT_BOUNCE_SAMPLES <= 0 || BOUNCE_CHUNK_SIZE <=
   exit 1
 fi
 
-export GEOMETRY DATA PRIORS CHECKPOINT BOUNCE_SAMPLES BOUNCE_CHUNK_SIZE RASTER_SIZE
+export GEOMETRY DATA PRIORS CHECKPOINT BOUNCE_SAMPLES BOUNCE_CHUNK_SIZE RASTER_SIZE STEPS
 export GEOMETRY_LR SCENE_CULLING
 export OPTIMIZE_SCENE_MEANS OPTIMIZE_SCENE_SCALES OPTIMIZE_SCENE_ROTATIONS
 export OPTIMIZE_SCENE_OPACITIES CONSTRAIN_SCENE_SCALES
@@ -137,7 +151,7 @@ echo "checkpoint: $CHECKPOINT"
 echo "geometry_lr=$GEOMETRY_LR scene_culling=$SCENE_CULLING raster_size=$RASTER_SIZE origin_offset=0.15 bounce_samples=$BOUNCE_SAMPLES bounce_chunk_size=$BOUNCE_CHUNK_SIZE albedo_initialization=$ALBEDO_INITIALIZATION neutral_albedo=$NEUTRAL_ALBEDO albedo_lr=$ALBEDO_LR six_axis_emission=$SIX_AXIS_EMISSION axis_lobe_sharpness=$EMITTER_AXIS_LOBE_SHARPNESS"
 echo "scene_geometry means=$OPTIMIZE_SCENE_MEANS scales=$OPTIMIZE_SCENE_SCALES rotations=$OPTIMIZE_SCENE_ROTATIONS opacities=$OPTIMIZE_SCENE_OPACITIES scale_constraint=$CONSTRAIN_SCENE_SCALES scale_ratio=[$SCENE_SCALE_MIN_RATIO,$SCENE_SCALE_MAX_RATIO]"
 echo "emitter_representation=$EMITTER_REPRESENTATION emitter_initialization=$EMITTER_INITIALIZATION merge_collinear_fragments=$MERGE_COLLINEAR_EMITTER_FRAGMENTS emitter_centers_trainable=$OPTIMIZE_EMITTER_CENTERS emitter_rotations_trainable=$OPTIMIZE_EMITTER_ROTATIONS emitter_scales_trainable=$OPTIMIZE_EMITTER_SCALES emitter_scale_constraint=$CONSTRAIN_EMITTER_SCALES scale_ratio=[$EMITTER_SCALE_MIN_RATIO,$EMITTER_SCALE_MAX_RATIO] emitter_adaptation=$EMITTER_ADAPTATION"
-echo "training_transport_mode=$TRAINING_TRANSPORT_MODE sh_fade=[$SH_FADE_START,$SH_FADE_END] material_freeze=15000 light_white_target=$LIGHT_WHITE light_white_ramp_end=$LIGHT_WHITE_RAMP_END"
+echo "training_steps=$STEPS training_transport_mode=$TRAINING_TRANSPORT_MODE sh_fade=[$SH_FADE_START,$SH_FADE_END] material_freeze=15000 light_white_target=$LIGHT_WHITE light_white_ramp_end=$LIGHT_WHITE_RAMP_END"
 
 verified=$("$PYTHON" scripts/check_training_provenance.py --stage aegir --action begin --data "$DATA" --geometry "$GEOMETRY" --priors "$PRIORS" --output "$CHECKPOINT")
 if [[ "$verified" != "1" ]]; then
@@ -156,11 +170,11 @@ if [[ "$verified" != "1" ]]; then
       --nerfstudio-dir "$DATA" \
       --prior-dir "$PRIORS" \
       --output "$CHECKPOINT" \
-      --steps 20000 \
+      --steps "$STEPS" \
       --bounce-chunk-size "$BOUNCE_CHUNK_SIZE" \
       --device cuda
   else
-    echo "Starting fresh 20k training"
+    echo "Starting fresh $STEPS-step training"
     "$PYTHON" - <<'PY'
 import os
 
@@ -168,7 +182,7 @@ from aegir.config import AEGIRConfig
 from aegir.trainer import train_shared_gaussians
 
 config = AEGIRConfig()
-config.training.steps = 20_000
+config.training.steps = int(os.environ["STEPS"])
 config.training.checkpoint_every = 5_000
 config.training.geometry_lr = float(os.environ["GEOMETRY_LR"])
 config.training.optimize_scene_means = os.environ["OPTIMIZE_SCENE_MEANS"] == "1"
@@ -238,15 +252,12 @@ payload = torch.load(sys.argv[1], map_location="cpu", weights_only=False)
 print(payload.get("format", "unknown"))
 PY
   )
-  if [[ "$checkpoint_format" != "aegir_shared_gaussian_v14" && "$checkpoint_format" != "aegir_shared_gaussian_v15" ]]; then
+  if [[ "$checkpoint_format" != "aegir_shared_gaussian_v16" ]]; then
     echo "refusing to reuse $CHECKPOINT ($checkpoint_format) for current directional training" >&2
     echo "choose a new OUTPUT_ROOT" >&2
     exit 2
   fi
-  if [[ "$checkpoint_format" == "aegir_shared_gaussian_v14" ]]; then
-    checkpoint_representation=planar_ellipse_2d
-  else
-    checkpoint_representation=$(
+  checkpoint_representation=$(
       "$PYTHON" - "$CHECKPOINT" <<'PY'
 import sys
 
@@ -255,8 +266,7 @@ import torch
 payload = torch.load(sys.argv[1], map_location="cpu", weights_only=False)
 print(payload["config"]["training"].get("emitter_representation", "planar_ellipse_2d"))
 PY
-    )
-  fi
+  )
   if [[ "$checkpoint_representation" != "$EMITTER_REPRESENTATION" ]]; then
     echo "refusing to reuse $CHECKPOINT with emitter representation $checkpoint_representation" >&2
     exit 2
@@ -298,6 +308,6 @@ echo "$(date --iso-8601=seconds) PIPELINE_COMPLETE"
 echo "checkpoint: $CHECKPOINT"
 echo "inspect: $INSPECT_ROOT/inspect_secondary_bounce"
 echo "target/render frames: $INSPECT_ROOT/inspect_secondary_bounce/target_render_compare_frames"
-echo "PLY: $INSPECT_ROOT/aegir_20k_scene_emitters.ply"
+echo "PLY: $INSPECT_ROOT/aegir_scene_emitters.ply"
 echo "Albedo comparison: $OUTPUT_ROOT/albedo_comparison30"
 echo "Denoiser comparison: $OUTPUT_ROOT/denoiser_comparison30"

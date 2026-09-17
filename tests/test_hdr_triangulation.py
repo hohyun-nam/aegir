@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -222,20 +223,30 @@ def test_fresh_training_keeps_initialized_emitters_without_loading_legacy_checkp
     scene = SimpleNamespace(to=lambda device: scene, bounds=lambda quantile: (torch.zeros(3), torch.ones(3)))
     monkeypatch.setattr(trainer, "validate_predicted_depth", lambda *args: None)
     monkeypatch.setattr(trainer, "validate_practical_geometry", lambda *args: None)
+    monkeypatch.setattr(trainer, "validate_emitter_inclusive_geometry", lambda *args: None)
     monkeypatch.setattr(trainer, "training_inputs", lambda *args: {})
     monkeypatch.setattr(trainer, "MultiViewSceneDataset", lambda *args, **kwargs: dataset)
     monkeypatch.setattr(trainer, "GaussianMaterialBackend", lambda *args, **kwargs: scene)
     monkeypatch.setattr(trainer, "initialize_emitters", lambda *args: model)
+    monkeypatch.setattr(
+        trainer,
+        "associate_gaussians_with_emitters",
+        lambda *args, **kwargs: {"tagged": 0, "counts": []},
+    )
 
     def forbid_legacy(*args):
         pytest.fail("Fresh HDR initialization must not load a legacy checkpoint")
 
     monkeypatch.setattr(trainer, "load_legacy_emitters", forbid_legacy)
     fitted = []
+    saved = []
 
     def make_trainer(scene, dataset, emitters, *args):
         assert emitters is model
-        return SimpleNamespace(fit=lambda: fitted.append(True))
+        return SimpleNamespace(
+            _save=lambda step, path: saved.append((step, Path(path).name)),
+            fit=lambda: fitted.append(True),
+        )
 
     monkeypatch.setattr(trainer, "SharedGaussianTrainer", make_trainer)
     config = AEGIRConfig()
@@ -244,3 +255,4 @@ def test_fresh_training_keeps_initialized_emitters_without_loading_legacy_checkp
         tmp_path / "geometry.pt", tmp_path, None, tmp_path / "out.pt", config, "cpu"
     )
     assert fitted == [True]
+    assert saved == [(0, "aegir_initialization.pt")]

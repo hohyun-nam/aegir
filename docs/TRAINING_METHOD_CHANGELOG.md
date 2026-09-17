@@ -51,9 +51,49 @@ Git commit: `b4392c0` (`Add six-axis emitters and corrected AEGIR transport pipe
   origin offset `0.15`, and SH-to-explicit hybrid transport were present.
 - Checkpoint format was v9.
 
-## 현재 실전 풀코스 설정 — 2026-09-16 정리
+## 현재 실전 풀코스 설정 — 2026-09-17
 
-아래는 `scripts/run_predicted_depth_full_pipeline.sh` 및 최근 Blender/Conference
+에미터를 2DGS에서 미리 삭제하던 방식을 폐기하고, **한 번 학습한 emitter-inclusive
+2DGS 안에서 에미터 Gaussian을 식별해 역할만 분리**한다.
+
+| 단계 | 현재 사용하는 방법 |
+| --- | --- |
+| Point cloud | RGB 예측 depth, stride 4, voxel 0.10m. 에미터 픽셀도 포함 |
+| Native 2DGS | 20K, 예측 depth Pearson 0.2. RGB/depth/초기 seed 모두 에미터 포함 |
+| Emitter 초기화 | 전체 2DGS G-buffer의 HDR 상위 0.5%를 3D로 올린 뒤 multi-view persistence → DBSCAN → PCA. GT emitter ID/shape/depth 미사용 |
+| Gaussian 연결 | PCA support 내부 source Gaussian에 `emitter_ids=0..E-1`, 일반 장면은 `-1`. tangent 1.05배, 법선 허용 폭은 scene diagonal의 0.1%; 3D emitter는 학습된 세 번째 support scale도 반영 |
+| 카메라 G-buffer | tagged Gaussian을 일반 BRDF layer에서 제외하고 analytic emitter의 `L_e`를 합성 |
+| Ray tracing | tagged Gaussian을 IRGS BVH에서 제외해 emitter가 자신을 가리거나 secondary surface로 중복 검출되지 않게 함 |
+| Emitter OFF | relighting subset에서 켠 emitter ID만 제외. 끈 emitter의 tagged Gaussian은 비발광 BRDF fixture로 다시 raster/BVH에 포함 |
+| 저장/호환 | `emitter_ids`를 checkpoint v16에 저장. v1-v15는 전부 `-1`인 배경으로 자동 로드 |
+| AEGIR 길이 | 당분간 기본 5K. 5K 이후 품질 정체 원인을 수정하기 전에는 바로 inspect로 진행 |
+| Inspect | train 128/1 뒤 128/8, denoiser off 기본 및 denoiser/albedo 비교, tagged source Gaussian을 제외한 PLY export |
+
+`scripts/run_predicted_depth_full_pipeline.sh`가 이 설정의 기준 launcher다. Blender
+호환 entrypoint와 Conference entrypoint도 이 스크립트로 연결된다. 새 출력 이름에는
+`emitter_inclusive`, `hdrgbuffer`, `5k`를 넣어 과거 emitter-excluded 20K 결과와 섞이지
+않게 했다. 일반 CLI의 `--steps`와 `TrainingConfig.steps` 기본값도 5K로 바꿨다.
+
+Association이 켜진 새 학습은 dataset의 GT/segmentation emitter mask를 AEGIR loss
+분리에 사용하지 않는다. analytic emitter의 카메라 투영 mask로 photometric/material
+영역을 나눈다. emitter mask는 과거 checkpoint/ablation 호환 입력으로만 남는다.
+
+실제 HDR G-buffer 초기화는 풀코스에서 한 번만 수행한다. 학습기가 optimizer와 scene을
+만든 직후 `aegir_initialization.pt`를 step 0 상태로 저장하고 같은 객체로 5K 학습을
+계속한다. 따라서 PLY 확인을 위해 전체 뷰 초기화를 중복 실행하지 않는다. 완료 후
+`emitter_initialization/2dgs_emitter_inclusive.ply`에는 원본 inclusive 2DGS가,
+`emitter_initialization/map_with_initial_emitters.ply`에는 tagged source row를 뺀 배경과
+초기 analytic emitter가 들어간다. `inspect_initialization_vs_5k/`에는 같은 10개 pose의
+GT/step0/step5K 비교와 점수가 저장된다.
+
+Conference의 과거 emitter-inclusive 2DGS 213,856개로 실제 검증했을 때 기존
+G-buffer 초기화가 별도 GT emitter 정보 없이 정확히 2개를 복원했고, ellipsoid support에
+각각 6,142개와 5,115개를 연결해 202,599개를 배경으로 유지했다. CUDA 2DGS raster와
+OptiX BVH 모두 tagged row 제외를 회귀 테스트했다.
+
+## 직전 실전 풀코스 설정 — 2026-09-16 기록
+
+아래는 당시 `scripts/run_predicted_depth_full_pipeline.sh` 및 Blender/Conference
 20K checkpoint의 실제 설정이다. 일반 CLI/dataclass의 호환 기본값과 구분한다.
 이전 실험은 삭제하지 않고 아래 날짜별 기록에 보존한다.
 

@@ -58,16 +58,23 @@ def render_full_frame(
     visibility_tracer: IRGSVisibilityTracer | None = None,
     generator: torch.Generator | None = None,
     transport_mode: str = "inference",
+    excluded_emitter_ids: tuple[int, ...] | None = None,
 ) -> dict[str, Tensor]:
     gbuffer = scene.rasterize(
         camera,
         alpha_threshold=config.raster.alpha_threshold,
         rasterize_mode=config.raster.rasterize_mode,
+        excluded_emitter_ids=excluded_emitter_ids,
     )
     height, width = gbuffer["points"].shape[:2]
     scene_scale = scene_scale_from_bounds(scene.bounds(config.raster.bounds_quantile))
     if visibility_tracer is None and config.render.point_visibility:
-        visibility_tracer = IRGSVisibilityTracer(scene, config.render, scene_scale=scene_scale)
+        visibility_tracer = IRGSVisibilityTracer(
+            scene,
+            config.render,
+            scene_scale=scene_scale,
+            excluded_emitter_ids=excluded_emitter_ids,
+        )
     elif visibility_tracer is not None:
         scene_scale = visibility_tracer.scene_scale
     renderer = DeferredRenderer(
@@ -173,7 +180,12 @@ def inspect_checkpoint(
     lpips_model = build_lpips_model(lpips_net, device)
     scene_scale = scene_scale_from_bounds(scene.bounds(config.raster.bounds_quantile))
     visibility_tracer = (
-        IRGSVisibilityTracer(scene, config.render, scene_scale=scene_scale)
+        IRGSVisibilityTracer(
+            scene,
+            config.render,
+            scene_scale=scene_scale,
+            excluded_emitter_ids=active_emitter_indices,
+        )
         if config.render.point_visibility
         else None
     )
@@ -203,6 +215,7 @@ def inspect_checkpoint(
             visibility_tracer=visibility_tracer,
             generator=generator,
             transport_mode="training" if training_sh_proxy else "inference",
+            excluded_emitter_ids=active_emitter_indices,
         )
         if denoise_indirect:
             surface_mask = (
@@ -364,7 +377,8 @@ def inspect_checkpoint(
             emitters_from_state(
                 initial_emitter_state,
                 "cpu",
-                preserve_3d=payload.get("format") == "aegir_shared_gaussian_v15",
+                preserve_3d=payload.get("format")
+                in {"aegir_shared_gaussian_v15", "aegir_shared_gaussian_v16"},
             )
         )
         index = torch.tensor(active_emitter_indices, dtype=torch.long)
@@ -420,7 +434,8 @@ def inspect_emitter_evolution(
             emitters_from_state(
                 initial_state,
                 "cpu",
-                preserve_3d=payload.get("format") == "aegir_shared_gaussian_v15",
+                preserve_3d=payload.get("format")
+                in {"aegir_shared_gaussian_v15", "aegir_shared_gaussian_v16"},
             )
         )
     output_dir = Path(output_dir)

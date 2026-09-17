@@ -31,11 +31,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--resume",
         type=Path,
         default=None,
-        help="resume an exact-resume v12 checkpoint; checkpoint config remains authoritative",
+        help="resume an exact-resume v14-v16 checkpoint; checkpoint config remains authoritative",
     )
     train.add_argument("--output", type=Path, required=True)
     train.add_argument("--device", default="cuda")
-    train.add_argument("--steps", type=int, default=20_000, help="final global-step target")
+    train.add_argument("--steps", type=int, default=5_000, help="final global-step target")
     train.add_argument("--image-size", type=int, default=128)
     train.add_argument("--max-views", type=int, default=None)
     train.add_argument("--max-gaussians", type=int, default=None)
@@ -134,6 +134,13 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="keep disconnected HDR pieces as separate emitter candidates",
     )
+    train.add_argument(
+        "--no-associate-emitter-gaussians",
+        action="store_true",
+        help="leave source Gaussians inside analytic emitters in the background scene",
+    )
+    train.add_argument("--emitter-gaussian-tangent-margin", type=float, default=1.05)
+    train.add_argument("--emitter-gaussian-normal-fraction", type=float, default=0.001)
     train.add_argument("--checkpoint-every", type=int, default=5_000)
     train.add_argument("--num-brdf-samples", type=int, default=128)
     train.add_argument("--num-light-samples", type=int, default=128)
@@ -347,6 +354,9 @@ def main() -> None:
         config.training.merge_collinear_emitter_fragments = (
             not args.no_merge_collinear_emitter_fragments
         )
+        config.training.associate_emitter_gaussians = not args.no_associate_emitter_gaussians
+        config.training.emitter_gaussian_tangent_margin = args.emitter_gaussian_tangent_margin
+        config.training.emitter_gaussian_normal_fraction = args.emitter_gaussian_normal_fraction
         config.training.optimize_emitter_centers = args.optimize_emitter_centers
         config.training.optimize_emitter_rotations = args.optimize_emitter_rotations
         config.training.optimize_emitter_scales = not args.freeze_emitter_scales

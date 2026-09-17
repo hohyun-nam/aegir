@@ -71,7 +71,7 @@ class DeferredRenderer:
         if occluder_points is not None:
             occluder_points = occluder_points.reshape(-1, occluder_points.shape[-1])
 
-        emission_hdr, emitter_mask = self._camera_visible_emission(gbuffer, emitters)
+        emission_hdr, emitter_mask = self.camera_visible_emission(gbuffer, emitters)
         gaussian_valid = gbuffer.get("valid_mask")
         if gaussian_valid is None:
             gaussian_valid_flat = torch.ones_like(emitter_mask.reshape(-1), dtype=torch.bool)
@@ -135,7 +135,7 @@ class DeferredRenderer:
             "normals": gbuffer["normals"],
         }
 
-    def _camera_visible_emission(
+    def camera_visible_emission(
         self,
         gbuffer: dict[str, Tensor],
         emitters: AreaEmitterModel,

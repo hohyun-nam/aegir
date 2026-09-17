@@ -26,7 +26,7 @@ from aegir.config import (
 from aegir.emitter_inspection import match_emitter_centers
 from aegir.emitters import AreaEmitterModel
 from aegir.gaussian_scene import GaussianMaterialBackend, gaussian_surface_normals, planarize_gaussians
-from aegir.initialization import _candidate_threshold
+from aegir.initialization import _candidate_threshold, associate_gaussians_with_emitters
 from aegir.losses import material_prior_loss
 from aegir.render import DeferredRenderer
 from aegir.scene_culling import (
@@ -45,6 +45,7 @@ from aegir.trainer import (
     scheduled_light_white_weight,
     training_sh_proxy_weight,
 )
+from scripts.export_scene_supersplat import scene_from_checkpoint
 
 
 def make_export(path: Path, count: int = 4) -> None:
@@ -79,6 +80,55 @@ def test_backend_owns_one_material_per_gaussian(tmp_path: Path) -> None:
     assert backend.training_sh_coeffs.shape == (4, 16, 3)
     assert backend.training_sh_degree == 3
     assert not backend.training_sh_coeffs.requires_grad
+    assert torch.equal(backend.emitter_ids, torch.full((4,), -1, dtype=torch.long))
+
+
+def test_supersplat_export_omits_tagged_emitter_rows(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "gaussians.pt"
+    make_export(checkpoint)
+    scene = GaussianMaterialBackend(checkpoint)
+    scene.emitter_ids[:] = torch.tensor([-1, 0, -1, 1])
+
+    exported = scene_from_checkpoint({"scene_state": scene.state_dict()})
+
+    assert exported["means"].shape[0] == 2
+    assert all(value.shape[0] == 2 for value in exported.values())
+    assert torch.equal(exported["means"], scene.means[[0, 2]])
+
+
+def test_inclusive_gaussians_are_associated_with_analytic_emitters(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "gaussians.pt"
+    make_export(checkpoint)
+    scene = GaussianMaterialBackend(checkpoint)
+    scene.means.data.copy_(
+        torch.tensor(
+            [
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.01],
+                [0.0, 0.0, 0.3],
+                [2.0, 0.0, 0.0],
+            ]
+        )
+    )
+    emitters = AreaEmitterModel(
+        centers=torch.zeros((1, 3)),
+        scales=torch.tensor([[1.0, 0.5]]),
+    )
+
+    diagnostic = associate_gaussians_with_emitters(
+        scene,
+        emitters,
+        (torch.full((3,), -2.0), torch.full((3,), 2.0)),
+        tangent_margin=1.0,
+        normal_fraction=0.01,
+    )
+
+    assert scene.emitter_ids.tolist() == [0, 0, -1, -1]
+    assert scene.background_mask.tolist() == [False, False, True, True]
+    assert scene.render_mask([0]).tolist() == [False, False, True, True]
+    assert scene.render_mask([]).tolist() == [True, True, True, True]
+    assert diagnostic["counts"] == [2]
+    assert diagnostic["tagged"] == 2
 
 
 def test_scene_geometry_optimization_can_select_scale_only(tmp_path: Path) -> None:
@@ -855,6 +905,7 @@ def test_light_sampling_evaluates_emitter_to_surface_outgoing_direction(monkeypa
 def test_legacy_geometry_prior_config_is_ignored() -> None:
     config = config_from_dict({"losses": {"prior_albedo": 0.75, "prior_normal": 0.05, "prior_depth": 0.05}})
     assert config.losses.prior_albedo == 0.75
+    assert not config.training.associate_emitter_gaussians
     assert not hasattr(config.losses, "prior_normal")
 
 
@@ -863,6 +914,7 @@ def test_shared_checkpoint_round_trip(tmp_path: Path) -> None:
     output = tmp_path / "aegir.pt"
     make_export(source)
     scene = GaussianMaterialBackend(source)
+    scene.emitter_ids[1] = 0
     emitters = AreaEmitterModel(torch.zeros((1, 3)), torch.full((1, 2), 0.1))
     initial_emitter_state = emitter_state_dict(emitters)
     save_checkpoint(
@@ -882,6 +934,7 @@ def test_shared_checkpoint_round_trip(tmp_path: Path) -> None:
     assert restored_emitters.num_emitters == 1
     assert restored_emitters.scales.shape == (1, 2)
     assert torch.allclose(restored_scene.albedo, scene.albedo)
+    assert torch.equal(restored_scene.emitter_ids, scene.emitter_ids)
     assert torch.allclose(
         payload["initial_emitter_state"]["centers"],
         initial_emitter_state["centers"],
@@ -1009,6 +1062,38 @@ def test_2dgs_rasterizer_forward_backward(tmp_path: Path) -> None:
     assert float(gbuffer["means2d"].grad.abs().sum()) > 0.0
     assert all(parameter.grad is not None for parameter in scene.parameters())
     assert all(torch.isfinite(parameter.grad).all() for parameter in scene.parameters())
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or importlib.util.find_spec("diff_surfel_rasterization") is None,
+    reason="official 2DGS CUDA rasterizer is unavailable",
+)
+def test_2dgs_rasterizer_omits_tagged_emitters_but_can_include_them_for_initialization(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "gaussians.pt"
+    make_export(source, count=2)
+    scene = GaussianMaterialBackend(source).cuda()
+    scene.emitter_ids[0] = 0
+    camera = {
+        "c2w": torch.eye(4, device="cuda"),
+        "fx": 50.0,
+        "fy": 50.0,
+        "cx": 20.0,
+        "cy": 24.0,
+        "width": 64,
+        "height": 64,
+    }
+
+    background = scene.rasterize(camera)
+    inactive_fixture = scene.rasterize(camera, excluded_emitter_ids=())
+    inclusive = scene.rasterize(camera, include_emitter_gaussians=True)
+
+    assert float(background["radii"][0]) == 0.0
+    assert float(background["radii"][1]) > 0.0
+    assert float(inactive_fixture["radii"][0]) > 0.0
+    assert float(inclusive["radii"][0]) > 0.0
+    assert float(inclusive["radii"][1]) > 0.0
 
 
 def test_emitter_matching_is_one_to_one_by_nearest_center() -> None:
