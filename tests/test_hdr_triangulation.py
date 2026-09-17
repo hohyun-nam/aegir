@@ -212,8 +212,9 @@ def test_rejected_final_center_is_fitted_once_for_duplicate_correspondences(monk
 
 
 @pytest.mark.parametrize("mode", ["hdr_gbuffer", "hdr_multiview"])
+@pytest.mark.parametrize("initialize_only", [False, True])
 def test_fresh_training_keeps_initialized_emitters_without_loading_legacy_checkpoint(
-    tmp_path, monkeypatch, mode
+    tmp_path, monkeypatch, mode, initialize_only
 ):
     from aegir import trainer
     from aegir.config import AEGIRConfig
@@ -252,7 +253,13 @@ def test_fresh_training_keeps_initialized_emitters_without_loading_legacy_checkp
     config = AEGIRConfig()
     config.training.emitter_initialization = mode
     trainer.train_shared_gaussians(
-        tmp_path / "geometry.pt", tmp_path, None, tmp_path / "out.pt", config, "cpu"
+        tmp_path / "geometry.pt",
+        tmp_path,
+        None,
+        tmp_path / "out.pt",
+        config,
+        "cpu",
+        initialize_only=initialize_only,
     )
-    assert fitted == [True]
+    assert fitted == ([] if initialize_only else [True])
     assert saved == [(0, "aegir_initialization.pt")]

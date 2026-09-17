@@ -1072,6 +1072,7 @@ def train_shared_gaussians(
     emitter_checkpoint: str | Path | None = None,
     max_views: int | None = None,
     max_gaussians: int | None = None,
+    initialize_only: bool = False,
 ) -> None:
     if config.training.associate_emitter_gaussians:
         if config.adaptive.enabled:
@@ -1138,6 +1139,9 @@ def train_shared_gaussians(
     initialization_checkpoint = Path(output_path).parent / "aegir_initialization.pt"
     trainer._save(0, initialization_checkpoint)
     print(f"initialization checkpoint: {initialization_checkpoint}", flush=True)
+    if initialize_only:
+        print("initialization-only run complete; training iterations were not started", flush=True)
+        return
     trainer.fit()
 
 

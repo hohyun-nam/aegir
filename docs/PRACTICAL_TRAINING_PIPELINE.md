@@ -59,8 +59,8 @@ Blender 스크립트 파일명의 `gtdepth`는 과거 명칭이다. 현재는 �
 - `AEGIR_OUTPUT/emitter_initialization/2dgs_emitter_inclusive.ply`: emitter fixture까지
   포함한 native 2DGS 원본.
 - `AEGIR_OUTPUT/aegir_initialization.pt`: HDR G-buffer에서 emitter를 복원하고 source
-  Gaussian에 ID를 연결한 직후의 step 0 checkpoint. 실제 5K 학습도 이 상태에서 바로
-  이어지므로 초기화를 두 번 계산하지 않는다.
+  Gaussian에 ID를 연결한 직후의 step 0 checkpoint. 초기화 PLY를 만든 다음 optimizer와
+  RNG까지 exact-resume하여 학습하므로 초기화를 두 번 계산하지 않는다.
 - `AEGIR_OUTPUT/emitter_initialization/map_with_initial_emitters.ply`: tagged source row를
   뺀 배경과 초록색 analytic emitter를 합친 초기화 확인용 PLY.
 - `AEGIR_OUTPUT/inspect_initialization_vs_5k/`: 동일 10개 pose의 GT, 초기화, 5K render
@@ -81,9 +81,30 @@ Blender 스크립트 파일명의 `gtdepth`는 과거 명칭이다. 현재는 �
 
 Conference inspect는 기존처럼 학습뷰 reconstruction이다. held-out 평가 분할은 이번 변경에 포함하지 않았다.
 
+## 20K scale-only geometry 비교 실험
+
+기본 5K 결과와 별개로 5K 이후 background Gaussian scale 학습을 확인할 때는 다음 전용
+entrypoint를 사용한다.
+
+```bash
+bash scripts/run_conference_inclusive2dgs_scale_only_20k_full_pipeline.sh
+```
+
+이 스크립트는 별도 경로에서 예측 depth, stride-4/voxel-0.10m point cloud,
+emitter-inclusive native 2DGS 20K를 다시 생성한다. AEGIR에서는 means/rotation/opacity와
+densification/pruning을 고정하고 scale만 LR `1e-6`, 초기값의 `0.9–1.1배` 범위에서
+학습한다. 기본 material/emitter curriculum은 유지하므로 scale LR은 5K부터 줄어 15K에
+0이 되며 emitter는 20K까지 학습된다.
+
+`inspect_checkpoint_progression/comparison/`에는 동일한 10개 pose에서 렌더한
+initialization/5K/10K/15K/20K 비교 frame, contact sheet, `summary.json`이 생성된다.
+렌더 설정은 BRDF/light 128, secondary 8, denoiser off다. 초기화 이전 native 결과와
+analytic emitter 초기화는 각각 `emitter_initialization/2dgs_emitter_inclusive.ply`와
+`emitter_initialization/map_with_initial_emitters.ply`로 확인한다.
+
 ## 현재 구현 검증
 
-- 비 OptiX 전체 테스트 143개와 OptiX tracer 테스트 12개 통과.
+- 비 OptiX 전체 테스트 145개와 OptiX tracer 테스트 12개 통과.
 - CUDA 2DGS에서 tagged row는 일반 raster의 radius가 0이고, 초기화용 inclusive
   raster에서는 다시 나타나는 것을 확인.
 - Conference의 기존 emitter-inclusive 2DGS 213,856개에서 GT emitter 정보 없이

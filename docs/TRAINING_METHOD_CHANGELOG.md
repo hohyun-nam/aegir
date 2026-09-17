@@ -79,12 +79,22 @@ Association이 켜진 새 학습은 dataset의 GT/segmentation emitter mask를 A
 영역을 나눈다. emitter mask는 과거 checkpoint/ablation 호환 입력으로만 남는다.
 
 실제 HDR G-buffer 초기화는 풀코스에서 한 번만 수행한다. 학습기가 optimizer와 scene을
-만든 직후 `aegir_initialization.pt`를 step 0 상태로 저장하고 같은 객체로 5K 학습을
-계속한다. 따라서 PLY 확인을 위해 전체 뷰 초기화를 중복 실행하지 않는다. 완료 후
+만든 직후 `aegir_initialization.pt`를 exact-resume 가능한 step 0 상태로 저장한다.
+초기화 PLY를 먼저 만든 뒤 그 checkpoint의 optimizer/RNG까지 복원해 학습을 계속하므로
+PLY 확인을 위해 전체 뷰 초기화를 중복 실행하지 않는다. 완료 후
 `emitter_initialization/2dgs_emitter_inclusive.ply`에는 원본 inclusive 2DGS가,
 `emitter_initialization/map_with_initial_emitters.ply`에는 tagged source row를 뺀 배경과
 초기 analytic emitter가 들어간다. `inspect_initialization_vs_5k/`에는 같은 10개 pose의
 GT/step0/step5K 비교와 점수가 저장된다.
+
+5K 이후의 배경 geometry 학습 효과를 확인하는 실험은 기본 설정과 분리했다.
+`run_conference_inclusive2dgs_scale_only_20k_full_pipeline.sh`는 새 model-depth seed와
+emitter-inclusive native 2DGS부터 다시 만들고 AEGIR을 20K까지 학습한다. 배경 Gaussian은
+scale만 LR `1e-6`으로 열며 means/rotation/opacity, densification, pruning은 고정한다.
+scale은 native 2DGS 초기값의 `0.9–1.1배`로 제한되고 기존 curriculum에 따라 5K–15K에
+LR이 0까지 감소한다. emitter는 기존 설정대로 계속 학습한다. step 0/5K/10K/15K/20K를
+같은 10개 pose, BRDF/light 128, secondary 8, denoiser off로 렌더한 뒤 한 폴더로 합친다.
+일반 풀코스의 기본 AEGIR 길이는 여전히 5K다.
 
 Conference의 과거 emitter-inclusive 2DGS 213,856개로 실제 검증했을 때 기존
 G-buffer 초기화가 별도 GT emitter 정보 없이 정확히 2개를 복원했고, ellipsoid support에

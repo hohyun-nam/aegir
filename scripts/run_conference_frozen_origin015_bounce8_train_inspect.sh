@@ -47,6 +47,7 @@ EMITTER_INITIALIZATION="${EMITTER_INITIALIZATION:-hdr_multiview}"
 EMITTER_PERSISTENCE_RADIUS_FRACTION="${EMITTER_PERSISTENCE_RADIUS_FRACTION:-0.01}"
 MERGE_COLLINEAR_EMITTER_FRAGMENTS="${MERGE_COLLINEAR_EMITTER_FRAGMENTS:-1}"
 STEPS="${STEPS:-5000}"
+INITIALIZE_ONLY="${INITIALIZE_ONLY:-0}"
 if (( STEPS % 1000 == 0 )); then
   STEP_LABEL="$((STEPS / 1000))k"
 else
@@ -110,7 +111,7 @@ if [[ "$EMITTER_REPRESENTATION" != "planar_ellipse_2d" && "$EMITTER_REPRESENTATI
   echo "EMITTER_REPRESENTATION must be planar_ellipse_2d or ellipsoid_3d" >&2
   exit 1
 fi
-for flag in OPTIMIZE_SCENE_MEANS OPTIMIZE_SCENE_SCALES OPTIMIZE_SCENE_ROTATIONS OPTIMIZE_SCENE_OPACITIES CONSTRAIN_SCENE_SCALES OPTIMIZE_EMITTER_CENTERS OPTIMIZE_EMITTER_ROTATIONS OPTIMIZE_EMITTER_SCALES CONSTRAIN_EMITTER_SCALES EMITTER_ADAPTATION MERGE_COLLINEAR_EMITTER_FRAGMENTS; do
+for flag in OPTIMIZE_SCENE_MEANS OPTIMIZE_SCENE_SCALES OPTIMIZE_SCENE_ROTATIONS OPTIMIZE_SCENE_OPACITIES CONSTRAIN_SCENE_SCALES OPTIMIZE_EMITTER_CENTERS OPTIMIZE_EMITTER_ROTATIONS OPTIMIZE_EMITTER_SCALES CONSTRAIN_EMITTER_SCALES EMITTER_ADAPTATION MERGE_COLLINEAR_EMITTER_FRAGMENTS INITIALIZE_ONLY; do
   if [[ "${!flag}" != "0" && "${!flag}" != "1" ]]; then
     echo "$flag must be 0 or 1" >&2
     exit 1
@@ -125,7 +126,7 @@ if (( BOUNCE_SAMPLES <= 0 || INSPECT_BOUNCE_SAMPLES <= 0 || BOUNCE_CHUNK_SIZE <=
   exit 1
 fi
 
-export GEOMETRY DATA PRIORS CHECKPOINT BOUNCE_SAMPLES BOUNCE_CHUNK_SIZE RASTER_SIZE STEPS
+export GEOMETRY DATA PRIORS CHECKPOINT BOUNCE_SAMPLES BOUNCE_CHUNK_SIZE RASTER_SIZE STEPS INITIALIZE_ONLY
 export GEOMETRY_LR SCENE_CULLING
 export OPTIMIZE_SCENE_MEANS OPTIMIZE_SCENE_SCALES OPTIMIZE_SCENE_ROTATIONS
 export OPTIMIZE_SCENE_OPACITIES CONSTRAIN_SCENE_SCALES
@@ -153,13 +154,22 @@ echo "scene_geometry means=$OPTIMIZE_SCENE_MEANS scales=$OPTIMIZE_SCENE_SCALES r
 echo "emitter_representation=$EMITTER_REPRESENTATION emitter_initialization=$EMITTER_INITIALIZATION merge_collinear_fragments=$MERGE_COLLINEAR_EMITTER_FRAGMENTS emitter_centers_trainable=$OPTIMIZE_EMITTER_CENTERS emitter_rotations_trainable=$OPTIMIZE_EMITTER_ROTATIONS emitter_scales_trainable=$OPTIMIZE_EMITTER_SCALES emitter_scale_constraint=$CONSTRAIN_EMITTER_SCALES scale_ratio=[$EMITTER_SCALE_MIN_RATIO,$EMITTER_SCALE_MAX_RATIO] emitter_adaptation=$EMITTER_ADAPTATION"
 echo "training_steps=$STEPS training_transport_mode=$TRAINING_TRANSPORT_MODE sh_fade=[$SH_FADE_START,$SH_FADE_END] material_freeze=15000 light_white_target=$LIGHT_WHITE light_white_ramp_end=$LIGHT_WHITE_RAMP_END"
 
+initialization_checkpoint="$OUTPUT_ROOT/aegir_initialization.pt"
 verified=$("$PYTHON" scripts/check_training_provenance.py --stage aegir --action begin --data "$DATA" --geometry "$GEOMETRY" --priors "$PRIORS" --output "$CHECKPOINT")
 if [[ "$verified" != "1" ]]; then
+  if [[ "$INITIALIZE_ONLY" == "1" && -s "$initialization_checkpoint" ]]; then
+    echo "Reusing existing initialization checkpoint: $initialization_checkpoint"
+    exit 0
+  fi
   resume=""
   shopt -s nullglob
   intermediate=("${CHECKPOINT%.pt}".step*.pt)
   if (( ${#intermediate[@]} > 0 )); then
     resume=$(printf '%s\n' "${intermediate[@]}" | sort -V | tail -n 1)
+  fi
+
+  if [[ -z "$resume" && -s "$initialization_checkpoint" ]]; then
+    resume="$initialization_checkpoint"
   fi
 
   if [[ -n "$resume" ]]; then
@@ -237,8 +247,14 @@ train_shared_gaussians(
     output_path=os.environ["CHECKPOINT"],
     config=config,
     device="cuda",
+    initialize_only=os.environ["INITIALIZE_ONLY"] == "1",
 )
 PY
+  fi
+  if [[ "$INITIALIZE_ONLY" == "1" ]]; then
+    test -s "$initialization_checkpoint"
+    echo "INITIALIZATION_COMPLETE: $initialization_checkpoint"
+    exit 0
   fi
   "$PYTHON" scripts/check_training_provenance.py --stage aegir --action complete --data "$DATA" --geometry "$GEOMETRY" --priors "$PRIORS" --output "$CHECKPOINT"
 else
@@ -272,6 +288,11 @@ PY
     exit 2
   fi
   echo "Reusing completed directional $checkpoint_representation checkpoint: $CHECKPOINT"
+fi
+
+if [[ "$INITIALIZE_ONLY" == "1" ]]; then
+  echo "Initialization is already covered by completed checkpoint: $CHECKPOINT"
+  exit 0
 fi
 
 echo "Training complete; starting 30-pose inspection with $INSPECT_BOUNCE_SAMPLES secondary samples and PLY export"
