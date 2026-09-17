@@ -100,6 +100,13 @@ pruning은 고정한다. 기존 curriculum에 따라 means LR은 5K–15K에 0�
 AEGIR 결과는 비교 대상으로 사용하지 않는다. 교정 실행은 새 mean-only AEGIR 경로를
 사용하므로 잘못된 step 0 optimizer 설정을 resume하지 않는다.
 
+Conference mean-only 풀코스가 성공한 경우에만 결과를 자동 분석하고 Blender의 새
+predicted-depth/point-cloud/native-2DGS/AEGIR 풀코스를 시작하는 순차 감시 runner를
+추가했다. 분석은 checkpoint별 영상 지표뿐 아니라 Gaussian center 이동 분포와
+scale/rotation/opacity가 실제로 고정됐는지 수치로 검사한다. Blender도 Conference와
+동일하게 ellipsoid emitter, secondary-only train128/1, inspect128/8, means-only LR
+`1e-6`, scene culling off, step0/5K/10K/15K/20K 비교를 사용한다.
+
 Native 2DGS PLY exporter는 Nerfstudio `pipeline` checkpoint와 현재
 `aegir_2dgs_geometry_v1` checkpoint를 모두 읽는다. 후자의 2축 linear scale에는
 시각화용 얇은 세 번째 축을 추가해 log-scale PLY로 기록하고 quaternion에서 normal을

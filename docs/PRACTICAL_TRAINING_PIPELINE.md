@@ -103,6 +103,15 @@ initialization/5K/10K/15K/20K 비교 frame, contact sheet, `summary.json`이 생
 analytic emitter 초기화는 각각 `emitter_initialization/2dgs_emitter_inclusive.ply`와
 `emitter_initialization/map_with_initial_emitters.ply`로 확인한다.
 
+Blender에서 같은 조건을 새 predicted-depth seed와 native 2DGS부터 실행하는 entrypoint는
+`scripts/run_blender_inclusive2dgs_mean_only_20k_full_pipeline.sh`다. Conference 완료 뒤
+자동 분석하고 Blender를 순서대로 시작하려면
+`scripts/watch_conference_then_run_blender_mean_only_20k.sh`를 별도 tmux에서 실행한다.
+감시기는 Conference의 최종 checkpoint, progression summary, 완료 marker를 모두 확인한
+경우에만 Blender를 시작한다. `scripts/analyze_mean_only_progression.py`는 각 checkpoint의
+PSNR/SSIM/LPIPS와 초기 2DGS 대비 background mean 이동량의 mean/median/p90/p95/p99/max,
+고정해야 하는 scale/rotation/opacity의 최대 변화량을 JSON으로 기록한다.
+
 ## 현재 구현 검증
 
 - 비 OptiX 전체 테스트 146개와 OptiX tracer 테스트 12개 통과.
