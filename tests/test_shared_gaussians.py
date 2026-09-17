@@ -45,6 +45,7 @@ from aegir.trainer import (
     scheduled_light_white_weight,
     training_sh_proxy_weight,
 )
+from scripts.export_dnsplatter_checkpoint_supersplat import load_checkpoint_gaussians
 from scripts.export_scene_supersplat import scene_from_checkpoint
 
 
@@ -94,6 +95,32 @@ def test_supersplat_export_omits_tagged_emitter_rows(tmp_path: Path) -> None:
     assert exported["means"].shape[0] == 2
     assert all(value.shape[0] == 2 for value in exported.values())
     assert torch.equal(exported["means"], scene.means[[0, 2]])
+
+
+def test_supersplat_export_loads_native_aegir_2dgs_geometry(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "native_2dgs.pt"
+    torch.save(
+        {
+            "format": "aegir_2dgs_geometry_v1",
+            "representation": "2dgs",
+            "step": 20_000,
+            "means": torch.tensor([[1.0, 2.0, 3.0]]),
+            "quats": torch.tensor([[1.0, 0.0, 0.0, 0.0]]),
+            "scales": torch.tensor([[0.1, 0.2]]),
+            "opacities_logits": torch.tensor([[2.0]]),
+            "features_dc_raw": torch.zeros((1, 1, 3)),
+            "features_rest_raw": torch.zeros((1, 15, 3)),
+        },
+        checkpoint,
+    )
+
+    step, exported = load_checkpoint_gaussians(checkpoint)
+
+    assert step == 20_000
+    assert all(value.shape[0] == 1 for value in exported.values())
+    assert exported["scale"].shape == (1, 3)
+    assert torch.allclose(exported["scale"].exp()[0, :2], torch.tensor([0.1, 0.2]))
+    assert torch.allclose(exported["normals"], torch.tensor([[0.0, 0.0, 1.0]]))
 
 
 def test_inclusive_gaussians_are_associated_with_analytic_emitters(tmp_path: Path) -> None:

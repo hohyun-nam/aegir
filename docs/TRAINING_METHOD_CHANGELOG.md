@@ -96,6 +96,12 @@ LR이 0까지 감소한다. emitter는 기존 설정대로 계속 학습한다. 
 같은 10개 pose, BRDF/light 128, secondary 8, denoiser off로 렌더한 뒤 한 폴더로 합친다.
 일반 풀코스의 기본 AEGIR 길이는 여전히 5K다.
 
+Native 2DGS PLY exporter는 Nerfstudio `pipeline` checkpoint와 현재
+`aegir_2dgs_geometry_v1` checkpoint를 모두 읽는다. 후자의 2축 linear scale에는
+시각화용 얇은 세 번째 축을 추가해 log-scale PLY로 기록하고 quaternion에서 normal을
+복원한다. 이로써 native 2DGS가 정상 완료된 뒤 PLY export에서 `KeyError: pipeline`으로
+중단되던 문제를 수정했다.
+
 Conference의 과거 emitter-inclusive 2DGS 213,856개로 실제 검증했을 때 기존
 G-buffer 초기화가 별도 GT emitter 정보 없이 정확히 2개를 복원했고, ellipsoid support에
 각각 6,142개와 5,115개를 연결해 202,599개를 배경으로 유지했다. CUDA 2DGS raster와

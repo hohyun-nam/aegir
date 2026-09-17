@@ -1,35 +1,60 @@
+#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
-from pathlib import Path
 import sys
+from pathlib import Path
 
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from aegir.gaussian_scene import (
+    gaussian_surface_normals,
+    surfel_scales_for_3d_export,
+)
+from aegir.math_utils import safe_normalize
 from scripts.export_supersplat_ply import filter_gaussians, write_binary_ply
-
 
 PARAMETER_PREFIX = "_model.gauss_params."
 
 
 def load_checkpoint_gaussians(path: Path) -> tuple[int, dict[str, torch.Tensor]]:
     payload = torch.load(path, map_location="cpu", weights_only=False)
-    state = payload["pipeline"]
+    if payload.get("format") == "aegir_2dgs_geometry_v1":
+        quats = safe_normalize(payload["quats"].detach().cpu().float(), dim=-1)
+        scales = payload["scales"].detach().cpu().float().clamp_min(1.0e-8)
+        if payload.get("representation") != "2dgs" or scales.shape[-1] != 2:
+            raise ValueError("AEGIR native geometry payload is not a 2DGS checkpoint")
+        data = {
+            "means": payload["means"].detach().cpu().float(),
+            "normals": gaussian_surface_normals(quats),
+            "f_dc": payload["features_dc_raw"].detach().cpu().float(),
+            "f_rest": payload["features_rest_raw"].detach().cpu().float(),
+            "opacity": payload["opacities_logits"].detach().cpu().float(),
+            "scale": surfel_scales_for_3d_export(scales).log(),
+            "rot": quats,
+        }
+    else:
+        state = payload.get("pipeline")
+        if state is None:
+            raise ValueError(
+                "unsupported Gaussian checkpoint: expected native aegir_2dgs_geometry_v1 "
+                "or a Nerfstudio pipeline state"
+            )
 
-    def tensor(name: str) -> torch.Tensor:
-        return state[PARAMETER_PREFIX + name].detach().cpu().float()
+        def tensor(name: str) -> torch.Tensor:
+            return state[PARAMETER_PREFIX + name].detach().cpu().float()
 
-    data = {
-        "means": tensor("means"),
-        "normals": tensor("normals"),
-        "f_dc": tensor("features_dc"),
-        "f_rest": tensor("features_rest"),
-        "opacity": tensor("opacities"),
-        "scale": tensor("scales"),
-        "rot": tensor("quats"),
-    }
+        data = {
+            "means": tensor("means"),
+            "normals": tensor("normals"),
+            "f_dc": tensor("features_dc"),
+            "f_rest": tensor("features_rest"),
+            "opacity": tensor("opacities"),
+            "scale": tensor("scales"),
+            "rot": tensor("quats"),
+        }
     count = data["means"].shape[0]
     if count == 0 or any(value.shape[0] != count for value in data.values()):
         raise ValueError("inconsistent or empty Gaussian tensors")

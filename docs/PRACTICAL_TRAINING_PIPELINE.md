@@ -104,7 +104,7 @@ analytic emitter 초기화는 각각 `emitter_initialization/2dgs_emitter_inclus
 
 ## 현재 구현 검증
 
-- 비 OptiX 전체 테스트 145개와 OptiX tracer 테스트 12개 통과.
+- 비 OptiX 전체 테스트 146개와 OptiX tracer 테스트 12개 통과.
 - CUDA 2DGS에서 tagged row는 일반 raster의 radius가 0이고, 초기화용 inclusive
   raster에서는 다시 나타나는 것을 확인.
 - Conference의 기존 emitter-inclusive 2DGS 213,856개에서 GT emitter 정보 없이
