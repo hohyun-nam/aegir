@@ -37,7 +37,9 @@ from aegir.scene_culling import (
 from aegir.trainer import (
     _factor_patch_shape,
     configure_emitter_optimization,
+    configure_scene_geometry_optimization,
     constrain_emitter_scales,
+    constrain_scene_scales,
     curriculum_lrs,
     full_view_material_prior_loss,
     scheduled_light_white_weight,
@@ -77,6 +79,48 @@ def test_backend_owns_one_material_per_gaussian(tmp_path: Path) -> None:
     assert backend.training_sh_coeffs.shape == (4, 16, 3)
     assert backend.training_sh_degree == 3
     assert not backend.training_sh_coeffs.requires_grad
+
+
+def test_scene_geometry_optimization_can_select_scale_only(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "gaussians.pt"
+    make_export(checkpoint)
+    scene = GaussianMaterialBackend(checkpoint)
+    config = AEGIRConfig()
+    config.training.optimize_scene_means = False
+    config.training.optimize_scene_scales = True
+    config.training.optimize_scene_rotations = False
+    config.training.optimize_scene_opacities = False
+
+    trainability = configure_scene_geometry_optimization(scene, config)
+
+    assert not scene.means.requires_grad
+    assert scene.log_scales.requires_grad
+    assert not scene.raw_quats.requires_grad
+    assert not scene.opacity_logits.requires_grad
+    assert trainability == {
+        id(scene.means): False,
+        id(scene.log_scales): True,
+        id(scene.raw_quats): False,
+        id(scene.opacity_logits): False,
+    }
+
+
+def test_scene_scale_constraint_uses_initial_relative_bounds(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "gaussians.pt"
+    make_export(checkpoint)
+    scene = GaussianMaterialBackend(checkpoint)
+    anchors = scene.scales.detach().clone()
+    config = AEGIRConfig()
+    config.training.constrain_scene_scales = True
+    config.training.scene_scale_min_ratio = 0.9
+    config.training.scene_scale_max_ratio = 1.1
+    scene.log_scales.data[0] = (anchors[0] * 2.0).log()
+    scene.log_scales.data[1] = (anchors[1] * 0.5).log()
+
+    constrain_scene_scales(scene, anchors, config)
+
+    assert torch.allclose(scene.scales[0], anchors[0] * 1.1)
+    assert torch.allclose(scene.scales[1], anchors[1] * 0.9)
 
 
 def test_neutral_albedo_initialization_ignores_dn_sh_dc(tmp_path: Path) -> None:

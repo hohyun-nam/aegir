@@ -85,6 +85,49 @@ def configure_emitter_optimization(
     return parameters
 
 
+def configure_scene_geometry_optimization(
+    scene: GaussianMaterialBackend,
+    config: AEGIRConfig,
+) -> dict[int, bool]:
+    """Select independently trainable background-Gaussian geometry tensors."""
+
+    training = config.training
+    trainable = {
+        "means": training.optimize_scene_means,
+        "log_scales": training.optimize_scene_scales,
+        "raw_quats": training.optimize_scene_rotations,
+        "opacity_logits": training.optimize_scene_opacities,
+    }
+    by_id: dict[int, bool] = {}
+    for name, enabled in trainable.items():
+        parameter = getattr(scene, name)
+        parameter.requires_grad_(enabled)
+        by_id[id(parameter)] = enabled
+    return by_id
+
+
+@torch.no_grad()
+def constrain_scene_scales(
+    scene: GaussianMaterialBackend,
+    anchors: Tensor,
+    config: AEGIRConfig,
+) -> None:
+    """Clamp background tangent scales to initialization-relative bounds."""
+
+    training = config.training
+    if not training.optimize_scene_scales or not training.constrain_scene_scales:
+        return
+    if anchors.shape != scene.log_scales.shape:
+        raise ValueError("scene scale-anchor shape differs from the Gaussian count")
+    if training.scene_scale_min_ratio <= 0.0:
+        raise ValueError("scene_scale_min_ratio must be positive")
+    if training.scene_scale_max_ratio < training.scene_scale_min_ratio:
+        raise ValueError("scene_scale_max_ratio must be at least scene_scale_min_ratio")
+    lower = (anchors.to(scene.log_scales) * training.scene_scale_min_ratio).clamp_min(1.0e-7)
+    upper = (anchors.to(scene.log_scales) * training.scene_scale_max_ratio).clamp_max(1.0e2)
+    scene.log_scales.data.clamp_(lower.log(), upper.log())
+
+
 @torch.no_grad()
 def constrain_emitter_scales(
     emitters: AreaEmitterModel,
@@ -315,6 +358,16 @@ class SharedGaussianTrainer:
         self.scene_scale = scene_scale_from_bounds(self.bounds)
         self.scene.sanitize_parameters(self.bounds)
         self.emitters.sanitize_parameters(self.bounds)
+        self.scene_scale_anchors = self.scene.scales.detach().clone()
+        self.scene_geometry_trainability = configure_scene_geometry_optimization(
+            self.scene,
+            config,
+        )
+        constrain_scene_scales(
+            self.scene,
+            self.scene_scale_anchors,
+            self.config,
+        )
         self.emitter_scale_anchors = self.emitters.scales.detach().clone()
         emitter_parameters = configure_emitter_optimization(self.emitters, config)
         constrain_emitter_scales(
@@ -546,6 +599,11 @@ class SharedGaussianTrainer:
                 self.exposure_optimizer.step()
                 self.log_exposure.data.clamp_(-8.0, 8.0)
             self.scene.sanitize_parameters(self.bounds)
+            constrain_scene_scales(
+                self.scene,
+                self.scene_scale_anchors,
+                self.config,
+            )
             self.emitters.sanitize_parameters(self.bounds)
             constrain_emitter_scales(
                 self.emitters,
@@ -768,6 +826,17 @@ class SharedGaussianTrainer:
                 result.new_material_parameters,
                 result,
             )
+            old_scale_anchors = self.scene_scale_anchors
+            self.scene_scale_anchors = old_scale_anchors[
+                result.new_to_old.to(old_scale_anchors.device)
+            ].clone()
+            self.scene_scale_anchors[result.child_mask] = self.scene.scales.detach()[
+                result.child_mask
+            ]
+            self.scene_geometry_trainability = configure_scene_geometry_optimization(
+                self.scene,
+                self.config,
+            )
             self.scene_culling_state["changes"] = int(
                 self.scene_culling_state["changes"] or 0
             ) + 1
@@ -811,8 +880,11 @@ class SharedGaussianTrainer:
             for group in optimizer.param_groups:
                 active = group["lr"] > 0.0
                 for parameter in group["params"]:
-                    parameter.requires_grad_(active)
-                    if not active:
+                    enabled = active
+                    if optimizer is self.geometry_optimizer:
+                        enabled = enabled and self.scene_geometry_trainability[id(parameter)]
+                    parameter.requires_grad_(enabled)
+                    if not enabled:
                         parameter.grad = None
         return geometry_lr, albedo_lr, material_lr, emitter_lr
 
@@ -865,6 +937,9 @@ class SharedGaussianTrainer:
             "emitter_optimization": {
                 "scale_anchors": self.emitter_scale_anchors.detach().cpu().clone(),
             },
+            "scene_geometry_optimization": {
+                "scale_anchors": self.scene_scale_anchors.detach().cpu().clone(),
+            },
             "adaptation": dict(self.adaptation_state),
             "scene_culling": {
                 "state": dict(self.scene_culling_state),
@@ -901,6 +976,13 @@ class SharedGaussianTrainer:
         self.emitter_scale_anchors = emitter_optimization["scale_anchors"].to(self.device)
         if self.emitter_scale_anchors.shape != self.emitters.log_scales.shape:
             raise ValueError("resume emitter scale anchors differ from the emitter count")
+        scene_geometry = training_state.get("scene_geometry_optimization")
+        if self.config.training.constrain_scene_scales:
+            if scene_geometry is None or "scale_anchors" not in scene_geometry:
+                raise ValueError("constrained scene-scale checkpoint has no scale anchors")
+            self.scene_scale_anchors = scene_geometry["scale_anchors"].to(self.device)
+            if self.scene_scale_anchors.shape != self.scene.log_scales.shape:
+                raise ValueError("resume scene scale anchors differ from the Gaussian count")
         self.adaptation_state = dict(training_state["adaptation"])
         scene_culling = training_state.get("scene_culling")
         if scene_culling is not None:

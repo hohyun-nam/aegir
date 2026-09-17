@@ -88,6 +88,18 @@ class ColorConfig:
 class TrainingConfig:
     steps: int = 20_000
     geometry_lr: float = 1.0e-5
+    # Geometry tensors share one optimizer, but ablations may isolate which
+    # 2DGS property receives gradients.  All remain enabled by default to
+    # preserve the historical trainable-geometry behavior.
+    optimize_scene_means: bool = True
+    optimize_scene_scales: bool = True
+    optimize_scene_rotations: bool = True
+    optimize_scene_opacities: bool = True
+    # Optional initialization-relative guard for scale-only refinement.  It is
+    # disabled by default and therefore does not alter existing experiments.
+    constrain_scene_scales: bool = False
+    scene_scale_min_ratio: float = 0.9
+    scene_scale_max_ratio: float = 1.1
     # Keep the faster albedo optimizer group for both SH DC and neutral seeds.
     # Roughness and metallic continue to use ``material_lr``.
     albedo_lr: float = 3.0e-3

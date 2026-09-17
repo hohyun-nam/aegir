@@ -780,7 +780,31 @@ Blender practical run `blender_practical3d_20260915_051804`는 native2DGS20K/exp
   **전체 pytest 146 passed**, 변경 Python Ruff 통과, 변경 shell 7개 syntax 통과.
   이는 회귀 검증이며 relighting/localization 강건성을 입증하는 평가가 아니다.
 
-### F. 아직 고치지 않은 문제와 계획
+### F. 2026-09-17 — Conference 배경 scale-only geometry ablation
+
+- 기존 `geometry_lr`는 배경 2D Gaussian의 center, tangent scale, rotation,
+  opacity를 전부 같은 optimizer group으로 학습했다. 개별 속성을 독립적으로 고정하는
+  `optimize_scene_{means,scales,rotations,opacities}` 설정과 대응 CLI/runner 옵션을
+  추가했다. 기존 checkpoint/config에는 네 옵션의 기본값이 모두 true이므로 과거의
+  trainable-geometry 의미는 유지된다.
+- 첫 Conference 진단은 **scale만 학습**한다. center/rotation/opacity, emitter
+  center/rotation, densification/pruning은 고정한다. geometry LR은 `1e-6`이고 배경
+  scale은 native 2DGS 초기값의 `0.9–1.1배`로 clamp한다. 이 초기 scale anchor는
+  exact-resume state에도 저장한다.
+- `scripts/run_conference_scale_only_geometry_ablation.sh`는 최신 practical Conference
+  geometry/data에서 secondary-only 128/1 학습과 128/8 30-view inspect를 수행한다.
+  완료 후 기존 frozen-geometry 20K 결과와 같은 frame/seed/target/mask인지 검사하고
+  `scripts/compose_geometry_scale_comparison.py`로 GT/fixed/scale-only/difference 비교
+  이미지, contact sheet, GIF, metrics JSON을 생성한다.
+- 이 실험은 Gaussian 수를 바꾸지 않는다. 따라서 결과 차이는 densification이나
+  opacity pruning이 아니라 배경 tangent scale 최적화에서 발생한다.
+- 검증: geometry 선택/scale clamp/exact-resume 관련 targeted **59 tests 통과**,
+  OptiX tracer를 제외한 전체 **138 tests 통과**, 변경 Python Ruff와 shell syntax 통과,
+  실제 기존 Conference 30-view artifact를 사용한 비교 composer smoke test 통과.
+  전체 suite의 OptiX tracer 구간은 이 서버의 `surfel_tracer.RayTracer` 생성 중 native
+  segfault로 중단되어 별도 GPU runtime 검증 대상으로 남겼다.
+
+### G. 아직 고치지 않은 문제와 계획
 
 - Native IRGS의 opacity-composited expected hit는 strict discrete first surface hit가 아니다.
 - Secondary NEE의 PDF surrogate bias는 sample 수를 늘려도 없어지지 않는다.
@@ -790,7 +814,7 @@ Blender practical run `blender_practical3d_20260915_051804`는 native2DGS20K/exp
   적응 및 localization feature/pose pipeline은 이 기록만으로 수정 완료라고 하지 않는다.
 - 인터랙티브 preview/release full-render 설계와 localization을 논의했지만 구현하지 않았다.
 
-### G. Git 전체 커밋 색인
+### H. Git 전체 커밋 색인
 
 아래는 이 저장소 baseline 이후 모든 기존 커밋을 빠짐없이 나열한다. 운영/문서/평가
 커밋도 포함하며 각 행을 새 학습 수식 변경으로 취급하지 않는다. 9월 15일 practical

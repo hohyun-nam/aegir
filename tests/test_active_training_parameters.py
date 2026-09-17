@@ -39,6 +39,18 @@ def test_inactive_gradient_cannot_suppress_emitter_gradient():
     assert light.grad.item() == pytest.approx(1.0, abs=2e-6)
 
 
+def test_positive_geometry_lr_respects_parameter_selection():
+    trainer = make_trainer()
+    geometry = trainer.scene["geometry"]
+    trainer.config.training.geometry_lr = 1.0e-6
+    trainer.scene_geometry_trainability = {id(geometry): False}
+
+    trainer._update_lrs(0)
+
+    assert not geometry.requires_grad
+    assert trainer.geometry_optimizer.param_groups[0]["lr"] == pytest.approx(1.0e-6)
+
+
 def test_freeze_removes_stale_gradients_and_keeps_light_transport_derivative():
     trainer = make_trainer()
     trainer._update_lrs(10_000)

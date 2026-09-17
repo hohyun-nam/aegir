@@ -17,6 +17,13 @@ INSPECT_BOUNCE_SAMPLES="${INSPECT_BOUNCE_SAMPLES:-$BOUNCE_SAMPLES}"
 BOUNCE_CHUNK_SIZE="${BOUNCE_CHUNK_SIZE:-65536}"
 RASTER_SIZE="${RASTER_SIZE:-256}"
 GEOMETRY_LR="${GEOMETRY_LR:-0.0}"
+OPTIMIZE_SCENE_MEANS="${OPTIMIZE_SCENE_MEANS:-1}"
+OPTIMIZE_SCENE_SCALES="${OPTIMIZE_SCENE_SCALES:-1}"
+OPTIMIZE_SCENE_ROTATIONS="${OPTIMIZE_SCENE_ROTATIONS:-1}"
+OPTIMIZE_SCENE_OPACITIES="${OPTIMIZE_SCENE_OPACITIES:-1}"
+CONSTRAIN_SCENE_SCALES="${CONSTRAIN_SCENE_SCALES:-0}"
+SCENE_SCALE_MIN_RATIO="${SCENE_SCALE_MIN_RATIO:-0.9}"
+SCENE_SCALE_MAX_RATIO="${SCENE_SCALE_MAX_RATIO:-1.1}"
 SCENE_CULLING="${SCENE_CULLING:-0}"
 ALBEDO_INITIALIZATION="${ALBEDO_INITIALIZATION:-sh_dc}"
 NEUTRAL_ALBEDO="${NEUTRAL_ALBEDO:-0.5}"
@@ -88,7 +95,7 @@ if [[ "$EMITTER_REPRESENTATION" != "planar_ellipse_2d" && "$EMITTER_REPRESENTATI
   echo "EMITTER_REPRESENTATION must be planar_ellipse_2d or ellipsoid_3d" >&2
   exit 1
 fi
-for flag in OPTIMIZE_EMITTER_CENTERS OPTIMIZE_EMITTER_ROTATIONS OPTIMIZE_EMITTER_SCALES CONSTRAIN_EMITTER_SCALES EMITTER_ADAPTATION; do
+for flag in OPTIMIZE_SCENE_MEANS OPTIMIZE_SCENE_SCALES OPTIMIZE_SCENE_ROTATIONS OPTIMIZE_SCENE_OPACITIES CONSTRAIN_SCENE_SCALES OPTIMIZE_EMITTER_CENTERS OPTIMIZE_EMITTER_ROTATIONS OPTIMIZE_EMITTER_SCALES CONSTRAIN_EMITTER_SCALES EMITTER_ADAPTATION; do
   if [[ "${!flag}" != "0" && "${!flag}" != "1" ]]; then
     echo "$flag must be 0 or 1" >&2
     exit 1
@@ -105,6 +112,9 @@ fi
 
 export GEOMETRY DATA PRIORS CHECKPOINT BOUNCE_SAMPLES BOUNCE_CHUNK_SIZE RASTER_SIZE
 export GEOMETRY_LR SCENE_CULLING
+export OPTIMIZE_SCENE_MEANS OPTIMIZE_SCENE_SCALES OPTIMIZE_SCENE_ROTATIONS
+export OPTIMIZE_SCENE_OPACITIES CONSTRAIN_SCENE_SCALES
+export SCENE_SCALE_MIN_RATIO SCENE_SCALE_MAX_RATIO
 export ALBEDO_INITIALIZATION NEUTRAL_ALBEDO ALBEDO_LR
 export SH_FADE_START SH_FADE_END
 export TRAINING_TRANSPORT_MODE
@@ -123,6 +133,7 @@ echo "$(date --iso-8601=seconds) conference geometry-configurable AEGIR"
 echo "geometry: $GEOMETRY"
 echo "checkpoint: $CHECKPOINT"
 echo "geometry_lr=$GEOMETRY_LR scene_culling=$SCENE_CULLING raster_size=$RASTER_SIZE origin_offset=0.15 bounce_samples=$BOUNCE_SAMPLES bounce_chunk_size=$BOUNCE_CHUNK_SIZE albedo_initialization=$ALBEDO_INITIALIZATION neutral_albedo=$NEUTRAL_ALBEDO albedo_lr=$ALBEDO_LR six_axis_emission=$SIX_AXIS_EMISSION axis_lobe_sharpness=$EMITTER_AXIS_LOBE_SHARPNESS"
+echo "scene_geometry means=$OPTIMIZE_SCENE_MEANS scales=$OPTIMIZE_SCENE_SCALES rotations=$OPTIMIZE_SCENE_ROTATIONS opacities=$OPTIMIZE_SCENE_OPACITIES scale_constraint=$CONSTRAIN_SCENE_SCALES scale_ratio=[$SCENE_SCALE_MIN_RATIO,$SCENE_SCALE_MAX_RATIO]"
 echo "emitter_representation=$EMITTER_REPRESENTATION emitter_centers_trainable=$OPTIMIZE_EMITTER_CENTERS emitter_rotations_trainable=$OPTIMIZE_EMITTER_ROTATIONS emitter_scales_trainable=$OPTIMIZE_EMITTER_SCALES emitter_scale_constraint=$CONSTRAIN_EMITTER_SCALES scale_ratio=[$EMITTER_SCALE_MIN_RATIO,$EMITTER_SCALE_MAX_RATIO] emitter_adaptation=$EMITTER_ADAPTATION"
 echo "training_transport_mode=$TRAINING_TRANSPORT_MODE sh_fade=[$SH_FADE_START,$SH_FADE_END] material_freeze=15000 light_white_target=$LIGHT_WHITE light_white_ramp_end=$LIGHT_WHITE_RAMP_END"
 
@@ -158,6 +169,13 @@ config = AEGIRConfig()
 config.training.steps = 20_000
 config.training.checkpoint_every = 5_000
 config.training.geometry_lr = float(os.environ["GEOMETRY_LR"])
+config.training.optimize_scene_means = os.environ["OPTIMIZE_SCENE_MEANS"] == "1"
+config.training.optimize_scene_scales = os.environ["OPTIMIZE_SCENE_SCALES"] == "1"
+config.training.optimize_scene_rotations = os.environ["OPTIMIZE_SCENE_ROTATIONS"] == "1"
+config.training.optimize_scene_opacities = os.environ["OPTIMIZE_SCENE_OPACITIES"] == "1"
+config.training.constrain_scene_scales = os.environ["CONSTRAIN_SCENE_SCALES"] == "1"
+config.training.scene_scale_min_ratio = float(os.environ["SCENE_SCALE_MIN_RATIO"])
+config.training.scene_scale_max_ratio = float(os.environ["SCENE_SCALE_MAX_RATIO"])
 config.training.albedo_lr = float(os.environ["ALBEDO_LR"])
 config.training.material_lr = 1.0e-3
 config.training.albedo_initialization = os.environ["ALBEDO_INITIALIZATION"]

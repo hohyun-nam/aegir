@@ -41,6 +41,17 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--max-gaussians", type=int, default=None)
     train.add_argument("--max-emitters", type=int, default=16)
     train.add_argument("--geometry-lr", type=float, default=1.0e-5)
+    train.add_argument("--freeze-scene-means", action="store_true")
+    train.add_argument("--freeze-scene-scales", action="store_true")
+    train.add_argument("--freeze-scene-rotations", action="store_true")
+    train.add_argument("--freeze-scene-opacities", action="store_true")
+    train.add_argument(
+        "--constrain-scene-scales",
+        action="store_true",
+        help="clamp learned background-Gaussian scales relative to their initialization",
+    )
+    train.add_argument("--scene-scale-min-ratio", type=float, default=0.9)
+    train.add_argument("--scene-scale-max-ratio", type=float, default=1.1)
     train.add_argument(
         "--albedo-lr",
         type=float,
@@ -313,6 +324,13 @@ def main() -> None:
         config.training.steps = args.steps
         config.raster.image_size = args.image_size
         config.training.geometry_lr = args.geometry_lr
+        config.training.optimize_scene_means = not args.freeze_scene_means
+        config.training.optimize_scene_scales = not args.freeze_scene_scales
+        config.training.optimize_scene_rotations = not args.freeze_scene_rotations
+        config.training.optimize_scene_opacities = not args.freeze_scene_opacities
+        config.training.constrain_scene_scales = args.constrain_scene_scales
+        config.training.scene_scale_min_ratio = args.scene_scale_min_ratio
+        config.training.scene_scale_max_ratio = args.scene_scale_max_ratio
         config.training.albedo_lr = args.albedo_lr
         config.training.material_lr = args.material_lr
         config.training.albedo_initialization = args.albedo_initialization
