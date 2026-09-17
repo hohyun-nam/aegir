@@ -88,13 +88,17 @@ PLY 확인을 위해 전체 뷰 초기화를 중복 실행하지 않는다. 완�
 GT/step0/step5K 비교와 점수가 저장된다.
 
 5K 이후의 배경 geometry 학습 효과를 확인하는 실험은 기본 설정과 분리했다.
-`run_conference_inclusive2dgs_scale_only_20k_full_pipeline.sh`는 새 model-depth seed와
-emitter-inclusive native 2DGS부터 다시 만들고 AEGIR을 20K까지 학습한다. 배경 Gaussian은
-scale만 LR `1e-6`으로 열며 means/rotation/opacity, densification, pruning은 고정한다.
-scale은 native 2DGS 초기값의 `0.9–1.1배`로 제한되고 기존 curriculum에 따라 5K–15K에
-LR이 0까지 감소한다. emitter는 기존 설정대로 계속 학습한다. step 0/5K/10K/15K/20K를
+`run_conference_inclusive2dgs_mean_only_20k_full_pipeline.sh`는 새로 완료한 model-depth seed와
+emitter-inclusive native 2DGS를 재사용하고 AEGIR을 별도 출력에서 20K까지 학습한다.
+배경 Gaussian은 means만 LR `1e-6`으로 열며 scale/rotation/opacity, densification,
+pruning은 고정한다. 기존 curriculum에 따라 means LR은 5K–15K에 0까지 감소하고 emitter는
+기존 설정대로 계속 학습한다. step 0/5K/10K/15K/20K를
 같은 10개 pose, BRDF/light 128, secondary 8, denoiser off로 렌더한 뒤 한 폴더로 합친다.
 일반 풀코스의 기본 AEGIR 길이는 여전히 5K다.
+
+처음 실행한 scale-only 설정은 사용자 의도와 달라 초기 82 step에서 중지했다. 그 실행의
+AEGIR 결과는 비교 대상으로 사용하지 않는다. 교정 실행은 새 mean-only AEGIR 경로를
+사용하므로 잘못된 step 0 optimizer 설정을 resume하지 않는다.
 
 Native 2DGS PLY exporter는 Nerfstudio `pipeline` checkpoint와 현재
 `aegir_2dgs_geometry_v1` checkpoint를 모두 읽는다. 후자의 2축 linear scale에는
