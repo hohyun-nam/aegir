@@ -158,6 +158,20 @@ def test_dataset_without_split_or_mask_falls_back_to_all_valid(
         MultiViewSceneDataset(scene, checkpoint, image_size=4, split="val")
 
 
+def test_ldr_dataset_does_not_load_hdr_copy_from_material_priors(tmp_path: Path) -> None:
+    scene = tmp_path / "scene"
+    checkpoint, priors = _write_scene(scene)
+    prior_path = priors / "frame_0000.pt"
+    payload = torch.load(prior_path, map_location="cpu", weights_only=False)
+    payload["radiance_hdr"] = torch.full((4, 4, 3), 100.0)
+    torch.save(payload, prior_path)
+
+    dataset = MultiViewSceneDataset(scene, checkpoint, priors, image_size=4, split="train")
+
+    assert dataset.observation_policy["domain"] == "ldr"
+    assert dataset.frames[0].radiance_hdr is None
+
+
 def test_referenced_missing_mask_is_reported(tmp_path: Path) -> None:
     scene = tmp_path / "scene"
     checkpoint, _ = _write_scene(scene, missing_mask=True)

@@ -8,9 +8,11 @@ from PIL import Image, ImageDraw
 
 from aegir.hdr_triangulation import (
     _merge_collinear_fragments,
+    detect_mask_observations,
     detect_observations,
     project,
     seed_emitters_from_hdr_multiview,
+    seed_emitters_from_sam3_multiview,
 )
 
 
@@ -56,6 +58,7 @@ def make_frames(ellipse=False, count=8):
                 index=index,
                 camera=camera,
                 radiance_hdr=torch.from_numpy(hdr),
+                target=torch.from_numpy(np.clip(hdr / 10.0, 0.0, 1.0)),
                 mask=torch.ones(128, 128, 1, dtype=torch.bool),
             )
         )
@@ -80,6 +83,31 @@ def test_hdr_triangulates_pose_support_without_depth_or_gt():
     assert torch.allclose(
         emitters.radiance(torch.tensor([[0.0, 0.0, 1.0]])), torch.full((1, 1, 3), 10.0), atol=1e-4
     )
+
+
+def test_sam3_triangulates_pose_support_without_reading_depth():
+    frames = make_frames()
+    for frame in frames:
+        frame.emitter_mask = (frame.radiance_hdr[..., :1] > 1.0)
+        frame.metric_depth = object()
+        frame.radiance_hdr = object()
+    emitters, diag = seed_emitters_from_sam3_multiview(
+        frames, ([-3.0, -3.0, -1.0], [3.0, 3.0, 4.0]), representation="ellipsoid_3d"
+    )
+    assert emitters.num_emitters == 1
+    assert np.linalg.norm(emitters.centers.detach().numpy()[0] - [0.0, 0.0, 2.0]) < 0.04
+    assert diag["method"] == "sam3_multiview"
+    assert diag["high_threshold"] is None
+    assert not diag["uses_depth_for_position"] and not diag["uses_gt_emitters"]
+    assert not diag["uses_hdr_observations"]
+    assert torch.allclose(
+        emitters.radiance(torch.tensor([[0.0, 0.0, 1.0]])), torch.ones((1, 1, 3)), atol=1e-4
+    )
+
+
+def test_sam3_observations_require_explicit_masks():
+    with pytest.raises(ValueError, match="requires emitter masks"):
+        detect_mask_observations(make_frames())
 
 
 def test_two_views_and_zero_baseline_cannot_produce_trusted_emitter():
@@ -211,7 +239,7 @@ def test_rejected_final_center_is_fitted_once_for_duplicate_correspondences(monk
     assert calls == {"score": 1, "shape": 1}
 
 
-@pytest.mark.parametrize("mode", ["hdr_gbuffer", "hdr_multiview"])
+@pytest.mark.parametrize("mode", ["hdr_gbuffer", "hdr_multiview", "sam3_multiview"])
 @pytest.mark.parametrize("initialize_only", [False, True])
 def test_fresh_training_keeps_initialized_emitters_without_loading_legacy_checkpoint(
     tmp_path, monkeypatch, mode, initialize_only
@@ -223,6 +251,7 @@ def test_fresh_training_keeps_initialized_emitters_without_loading_legacy_checkp
     model = object()
     scene = SimpleNamespace(to=lambda device: scene, bounds=lambda quantile: (torch.zeros(3), torch.ones(3)))
     monkeypatch.setattr(trainer, "validate_predicted_depth", lambda *args: None)
+    monkeypatch.setattr(trainer, "validate_sam3_ldr_view", lambda *args: None)
     monkeypatch.setattr(trainer, "validate_practical_geometry", lambda *args: None)
     monkeypatch.setattr(trainer, "validate_emitter_inclusive_geometry", lambda *args: None)
     monkeypatch.setattr(trainer, "training_inputs", lambda *args: {})
