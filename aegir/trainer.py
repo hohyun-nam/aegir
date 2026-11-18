@@ -21,18 +21,22 @@ from .checkpoint import (
 )
 from .color import apply_ldr_pipeline, configure_ldr_fallback, display_srgb, hdr_log_image
 from .config import AEGIRConfig, LossWeights, config_from_dict
-from .data import MultiViewSceneDataset
+from .data import MultiViewSceneDataset, image_dimensions
 from .emitters import AreaEmitterModel
 from .gaussian_scene import GaussianMaterialBackend
-from .hdr_triangulation import seed_emitters_from_hdr_multiview
+from .hdr_triangulation import (
+    seed_emitters_from_hdr_multiview,
+)
 from .initialization import (
     associate_gaussians_with_emitters,
     restore_ellipsoid_support,
+    seed_emitters_from_mask_pointcloud,
     seed_emitters_from_gbuffer_views,
     seed_emitters_from_predicted_depth,
     seed_planar_emitters_from_masks,
 )
 from .irgs_tracer import IRGSVisibilityTracer
+from .indirect import DIRECT_SH_MODE, GlobalDiffuseSH, load_indirect_light
 from .losses import (
     edge_aware_tv,
     emitter_regularization,
@@ -46,6 +50,7 @@ from .provenance import (
     validate_emitter_inclusive_geometry,
     validate_practical_geometry,
     validate_predicted_depth,
+    validate_sam3_ldr_view,
     write_json,
 )
 from .render import DeferredRenderer
@@ -66,6 +71,27 @@ def curriculum_lrs(config: AEGIRConfig, step: int) -> tuple[float, float, float,
             cfg.emitter_lr * (1.0 - t) + cfg.emitter_final_lr * t,
         )
     return 0.0, 0.0, 0.0, cfg.emitter_final_lr
+
+
+def scheduled_indirect_lr(config: AEGIRConfig, step: int) -> float:
+    """Apply SH warmup, optionally decaying with the material schedule.
+
+    Saved warmup and constant-LR configs remain authoritative during resume.
+    """
+    cfg = config.training
+    if not math.isfinite(cfg.indirect_lr) or cfg.indirect_lr < 0 or cfg.indirect_start_step < 0:
+        raise ValueError("indirect LR and start step must be finite and non-negative")
+    if cfg.indirect_final_lr is not None:
+        if not math.isfinite(cfg.indirect_final_lr) or not 0 <= cfg.indirect_final_lr <= cfg.indirect_lr:
+            raise ValueError("indirect_final_lr must be finite and between zero and indirect_lr")
+        if not 0 <= cfg.freeze_start < cfg.freeze_end:
+            raise ValueError("indirect decay requires 0 <= freeze_start < freeze_end")
+    if step < cfg.indirect_start_step:
+        return 0.0
+    if cfg.indirect_final_lr is None:
+        return cfg.indirect_lr
+    t = min(1.0, max(0.0, (step - cfg.freeze_start) / (cfg.freeze_end - cfg.freeze_start)))
+    return cfg.indirect_lr * (1.0 - t) + cfg.indirect_final_lr * t
 
 
 def configure_emitter_optimization(
@@ -165,6 +191,8 @@ def training_sh_proxy_weight(config: AEGIRConfig, step: int) -> float:
     """Finish the SH fade before material learning freezes."""
 
     cfg = config.training
+    if config.render.lighting_mode == DIRECT_SH_MODE:
+        return 0.0
     valid_modes = {"hybrid", "secondary_only", "sh_proxy_only"}
     if cfg.training_transport_mode not in valid_modes:
         raise ValueError(
@@ -236,10 +264,19 @@ def initialize_emitters(
     bounds: tuple[Tensor, Tensor],
     config: AEGIRConfig,
     device: str,
+    *,
+    require_predicted_depth_provenance: bool = True,
 ) -> AreaEmitterModel:
     representation = config.training.emitter_representation
     mode = config.training.emitter_initialization
-    if mode not in {"hdr_multiview", "hdr_predicted_depth", "hdr_gbuffer", "gt_mask_depth"}:
+    if mode not in {
+        "hdr_multiview",
+        "hdr_predicted_depth",
+        "hdr_gbuffer",
+        "gt_mask_depth",
+        "sam3_mask_depth",
+        "sam3_multiview",
+    }:
         raise ValueError(f"unsupported emitter initialization {mode!r}")
     if representation not in {"planar_ellipse_2d", "ellipsoid_3d"}:
         raise ValueError(f"unsupported emitter representation {representation!r}")
@@ -256,7 +293,12 @@ def initialize_emitters(
         )
 
     if mode == "hdr_multiview":
-        validate_predicted_depth(dataset.root, dataset.metadata)
+        # Normal practical reconstruction verifies the RGB-model depth used to
+        # build its Gaussian map. Known-pose lighting adaptation reuses an
+        # already verified map and triangulates lights from calibrated HDR rays
+        # only, so the new observations need no predicted-depth provenance.
+        if require_predicted_depth_provenance:
+            validate_predicted_depth(dataset.root, dataset.metadata)
         emitters, diagnostic = seed_emitters_from_hdr_multiview(
             dataset.frames, (bounds[0].cpu(), bounds[1].cpu()),
             quantile=config.training.emitter_init_quantile,
@@ -274,6 +316,48 @@ def initialize_emitters(
         )
         dataset.emitter_initialization_diagnostic = diagnostic
         return emitters.to(device)
+    if mode == "sam3_multiview":
+        if dataset.metadata.get("emitter_mask_source") != "sam3":
+            raise ValueError("SAM3 multi-view initialization requires an explicit SAM3 mask view")
+        if any(getattr(frame, 'radiance_hdr', None) is not None or
+               getattr(frame, 'metric_depth', None) is not None for frame in dataset.frames):
+            raise ValueError("SAM3 surface initialization requires frames without HDR or external depth")
+        gbuffers = []
+        with torch.no_grad():
+            for index, frame in enumerate(dataset.frames):
+                if index % 25 == 0:
+                    print(
+                        f"SAM3 point-cloud init: projecting view {index + 1}/{len(dataset.frames)}",
+                        flush=True,
+                    )
+                rendered = scene.rasterize(
+                    _camera_to(frame.camera, device),
+                    alpha_threshold=config.raster.alpha_threshold,
+                    rasterize_mode=config.raster.rasterize_mode,
+                )
+                gbuffers.append(
+                    {
+                        "points": rendered["points"].detach().cpu(),
+                        "valid_mask": rendered["valid_mask"].detach().cpu(),
+                        "camera_origins": rendered["camera_origins"].detach().cpu(),
+                    }
+                )
+        emitters, diagnostic = seed_emitters_from_mask_pointcloud(
+            dataset.frames,
+            gbuffers,
+            (bounds[0].cpu(), bounds[1].cpu()),
+            min_views=config.training.emitter_persistence_min_views,
+            min_fraction=config.training.emitter_persistence_min_fraction,
+            min_scale_fraction=config.training.emitter_min_scale_fraction,
+            max_emitters=config.adaptive.max_emitters,
+        )
+        emitters = apply_representation(emitters)
+        state = emitters.state()
+        for index, record in enumerate(diagnostic["emitters"]):
+            record["center"] = state.centers[index].cpu().tolist()
+            record["scales"] = state.scales[index].cpu().tolist()
+        dataset.emitter_initialization_diagnostic = diagnostic
+        return emitters.to(device)
     if mode == "hdr_predicted_depth":
         validate_predicted_depth(dataset.root, dataset.metadata)
         emitters = seed_emitters_from_predicted_depth(
@@ -287,15 +371,19 @@ def initialize_emitters(
             persistence_radius_fraction=config.training.emitter_persistence_radius_fraction,
         )
         return apply_representation(emitters).to(device)
-    if mode == "gt_mask_depth":
+    if mode in {"gt_mask_depth", "sam3_mask_depth"}:
+        if mode == "sam3_mask_depth":
+            validate_predicted_depth(dataset.root, dataset.metadata)
+            if dataset.metadata.get("emitter_mask_source") != "sam3":
+                raise ValueError("SAM3 initialization requires an explicit SAM3 mask view")
         masked_emitters = seed_planar_emitters_from_masks(
             dataset.frames, (bounds[0].cpu(), bounds[1].cpu()),
-            emitter_definitions=dataset.emitter_definitions,
+            emitter_definitions=dataset.emitter_definitions if mode == "gt_mask_depth" else None,
             min_scale_fraction=config.training.emitter_min_scale_fraction,
             max_emitters=config.adaptive.max_emitters,
         )
         if masked_emitters is None:
-            raise ValueError("Explicit GT initialization has no usable masks/depth")
+            raise ValueError(f"{mode} initialization has no usable masks/depth")
         return apply_representation(masked_emitters).to(device)
 
     targets: list[Tensor] = []
@@ -370,6 +458,7 @@ class SharedGaussianTrainer:
         output_path: str | Path,
         device: str,
         bounds: tuple[Tensor, Tensor] | None = None,
+        indirect_light: GlobalDiffuseSH | None = None,
     ) -> None:
         self.scene = scene
         self.dataset = dataset
@@ -377,6 +466,17 @@ class SharedGaussianTrainer:
         self.config = config
         self.output_path = Path(output_path)
         self.device = device
+        scheduled_indirect_lr(config, 0)
+        if min(config.losses.indirect_energy, config.losses.indirect_directional) < 0:
+            raise ValueError("indirect regularization weights must be non-negative")
+        self.indirect_light = (
+            (indirect_light if indirect_light is not None else GlobalDiffuseSH(config.render.indirect_irradiance_init)).to(device)
+            if config.render.lighting_mode == DIRECT_SH_MODE else None
+        )
+        self.indirect_optimizer = (
+            torch.optim.Adam(self.indirect_light.parameters(), lr=config.training.indirect_lr)
+            if self.indirect_light is not None else None
+        )
         self.bounds = (
             tuple(value.to(device) for value in bounds)
             if bounds is not None
@@ -416,6 +516,7 @@ class SharedGaussianTrainer:
                 else None
             ),
             scene_scale=self.scene_scale,
+            indirect_light=self.indirect_light,
         )
         self.initial_emitter_state = emitter_state_dict(self.emitters)
         self.geometry_optimizer = torch.optim.Adam(
@@ -492,7 +593,7 @@ class SharedGaussianTrainer:
             "total_duplicated": 0,
         }
 
-    def fit(self, start_step: int = 0) -> None:
+    def fit(self, start_step: int = 0, stop_requested=None) -> bool:
         steps = self.config.training.steps
         if start_step < 0 or start_step > steps:
             raise ValueError(f"resume next_step {start_step} is outside target range [0, {steps}]")
@@ -500,6 +601,13 @@ class SharedGaussianTrainer:
         self.scene.sanitize_parameters(self.bounds)
         self.emitters.sanitize_parameters(self.bounds)
         for step in iterator:
+            # Cooperative SIGINT/SIGTERM handling: only checkpoint between
+            # complete optimizer updates, never a partially updated iteration.
+            if stop_requested is not None and stop_requested():
+                interrupted = self.output_path.parent / "aegir_interrupted.pt"
+                self._save(step, interrupted)
+                print(f"TRAINING_STOPPED: next_step={step}; checkpoint={interrupted}", flush=True)
+                return False
             # Rebuild after an actual geometry update, including the last
             # update immediately before its LR reaches zero. A resumed trainer
             # already built its BVH from the restored scene in __init__.
@@ -522,6 +630,9 @@ class SharedGaussianTrainer:
                 camera,
                 alpha_threshold=self.config.raster.alpha_threshold,
                 rasterize_mode=self.config.raster.rasterize_mode,
+                include_emitter_gaussians=self.config.render.tagged_surface_emission,
+                camera_emitter_ids=(tuple(range(self.emitters.num_emitters))
+                                    if self.config.render.tagged_surface_emission else None),
             )
             self._accumulate_scene_culling_stats(full_gbuffer)
             gaussian_valid = full_gbuffer["valid_mask"].bool()
@@ -619,7 +730,12 @@ class SharedGaussianTrainer:
                 self.surface_points,
                 self.cameras,
             )
-            total = photo + prior + tv + light
+            indirect_prior = (
+                self.indirect_light.regularization(
+                    self.config.losses.indirect_energy, self.config.losses.indirect_directional,
+                ) if self.indirect_light is not None else photo.new_zeros(())
+            )
+            total = photo + prior + tv + light + indirect_prior
             if not torch.isfinite(total):
                 self.scene.sanitize_parameters(self.bounds)
                 self.emitters.sanitize_parameters(self.bounds)
@@ -630,6 +746,8 @@ class SharedGaussianTrainer:
             self.geometry_optimizer.step()
             self.material_optimizer.step()
             self.emitter_optimizer.step()
+            if self.indirect_optimizer is not None:
+                self.indirect_optimizer.step()
             if self.exposure_optimizer is not None:
                 self.exposure_optimizer.step()
                 self.log_exposure.data.clamp_(-8.0, 8.0)
@@ -656,6 +774,9 @@ class SharedGaussianTrainer:
                     "prior": float(prior.detach().cpu()),
                     "tv": float(tv.detach().cpu()),
                     "light": float(light.detach().cpu()),
+                    "indirect_prior": float(indirect_prior.detach().cpu()),
+                    "indirect_lr": (self.indirect_optimizer.param_groups[0]["lr"]
+                                    if self.indirect_optimizer is not None else 0.0),
                     "light_white_weight": light_white_weight,
                     "geometry_lr": lrs[0],
                     "albedo_lr": lrs[1],
@@ -663,7 +784,9 @@ class SharedGaussianTrainer:
                     "emitter_lr": lrs[3],
                     "sh_proxy_weight": sh_proxy_weight,
                     "explicit_bounce_weight": (
-                        1.0 - sh_proxy_weight if self.config.render.indirect_bounce else 0.0
+                        1.0 - sh_proxy_weight
+                        if self.config.render.indirect_bounce and self.config.render.lighting_mode != DIRECT_SH_MODE
+                        else 0.0
                     ),
                     "direct_hdr_mean": float(rendered["direct_hdr"].detach().mean().cpu()),
                     "indirect_hdr_mean": float(rendered["indirect_hdr"].detach().mean().cpu()),
@@ -714,6 +837,7 @@ class SharedGaussianTrainer:
                 self._save(step + 1, self.output_path.with_suffix(f".step{step + 1:05d}.pt"))
 
         self._save(steps, self.output_path)
+        return True
 
     def _select_patch(
         self,
@@ -750,11 +874,15 @@ class SharedGaussianTrainer:
         self.geometry_optimizer.zero_grad(set_to_none=True)
         self.material_optimizer.zero_grad(set_to_none=True)
         self.emitter_optimizer.zero_grad(set_to_none=True)
+        if self.indirect_optimizer is not None:
+            self.indirect_optimizer.zero_grad(set_to_none=True)
         if self.exposure_optimizer is not None:
             self.exposure_optimizer.zero_grad(set_to_none=True)
 
     def _sanitize_gradients(self) -> None:
         optimizers = [self.geometry_optimizer, self.material_optimizer, self.emitter_optimizer]
+        if getattr(self, "indirect_optimizer", None) is not None:
+            optimizers.append(self.indirect_optimizer)
         if self.exposure_optimizer is not None:
             optimizers.append(self.exposure_optimizer)
         parameters = [
@@ -839,7 +967,7 @@ class SharedGaussianTrainer:
         self.scene_culling_state["last_check_step"] = completed_steps
         average_xy_gradient = (
             self.xy_grad_norm / self.xy_grad_vis_counts.clamp_min(1.0)
-        ) * (0.5 * self.config.raster.image_size)
+        ) * (0.5 * max(image_dimensions(self.config.raster.image_size)))
         old_count = self.scene.gaussian_count
         result = refine_scene_gaussians(
             self.scene,
@@ -911,7 +1039,11 @@ class SharedGaussianTrainer:
         self.material_optimizer.param_groups[0]["lr"] = albedo_lr
         self.material_optimizer.param_groups[1]["lr"] = material_lr
         self.emitter_optimizer.param_groups[0]["lr"] = emitter_lr
-        for optimizer in (self.geometry_optimizer, self.material_optimizer, self.emitter_optimizer):
+        optimizers = [self.geometry_optimizer, self.material_optimizer, self.emitter_optimizer]
+        if getattr(self, "indirect_optimizer", None) is not None:
+            self.indirect_optimizer.param_groups[0]["lr"] = scheduled_indirect_lr(self.config, step)
+            optimizers.append(self.indirect_optimizer)
+        for optimizer in optimizers:
             for group in optimizer.param_groups:
                 active = group["lr"] > 0.0
                 for parameter in group["params"]:
@@ -958,9 +1090,15 @@ class SharedGaussianTrainer:
                     "emitter_gaussian_association_diagnostic",
                     None,
                 ),
+                "lighting_adaptation": getattr(
+                    self.dataset,
+                    "lighting_adaptation_provenance",
+                    None,
+                ),
             },
             initial_emitter_state=self.initial_emitter_state,
             training_state=self._capture_training_state(step),
+            indirect_light=self.indirect_light,
         )
 
     def _capture_training_state(self, next_step: int) -> dict:
@@ -970,6 +1108,8 @@ class SharedGaussianTrainer:
                 "geometry": optimizer_state_dict_cpu(self.geometry_optimizer),
                 "material": optimizer_state_dict_cpu(self.material_optimizer),
                 "emitter": optimizer_state_dict_cpu(self.emitter_optimizer),
+                "indirect": (optimizer_state_dict_cpu(self.indirect_optimizer)
+                             if self.indirect_optimizer is not None else None),
             },
             "rng": capture_rng_state(self.device),
             "bounds": [value.detach().cpu().clone() for value in self.bounds],
@@ -1011,6 +1151,12 @@ class SharedGaussianTrainer:
         self.geometry_optimizer.load_state_dict(optimizers["geometry"])
         self.material_optimizer.load_state_dict(optimizers["material"])
         self.emitter_optimizer.load_state_dict(optimizers["emitter"])
+        if self.indirect_light is not None:
+            restored_indirect = load_indirect_light(payload, self.device)
+            if restored_indirect is None:
+                raise ValueError("learned-indirect resume requires saved SH state")
+            self.indirect_light.load_state_dict(restored_indirect.state_dict(), strict=True)
+            self.indirect_optimizer.load_state_dict(optimizers["indirect"])
         self.surface_points = training_state["surface_points"].to(self.device)
         emitter_optimization = training_state["emitter_optimization"]
         self.emitter_scale_anchors = emitter_optimization["scale_anchors"].to(self.device)
@@ -1074,6 +1220,8 @@ def train_shared_gaussians(
     max_gaussians: int | None = None,
     initialize_only: bool = False,
 ) -> None:
+    if config.training.emitter_initialization == "sam3_multiview":
+        validate_sam3_ldr_view(Path(nerfstudio_dir))
     if config.training.associate_emitter_gaussians:
         if config.adaptive.enabled:
             raise ValueError(
@@ -1084,14 +1232,24 @@ def train_shared_gaussians(
             raise ValueError(
                 "Emitter Gaussian association requires fixed emitter centers/rotations"
             )
-    if config.training.emitter_initialization in {"hdr_multiview", "hdr_predicted_depth", "hdr_gbuffer"}:
-        validate_predicted_depth(Path(nerfstudio_dir))
-        if config.training.emitter_initialization == "hdr_gbuffer":
+    if config.training.emitter_initialization in {
+        "hdr_multiview",
+        "hdr_predicted_depth",
+        "hdr_gbuffer",
+        "sam3_mask_depth",
+        "sam3_multiview",
+    }:
+        if config.training.emitter_initialization not in {"hdr_multiview", "sam3_multiview"}:
+            validate_predicted_depth(Path(nerfstudio_dir))
+        if (
+            config.training.emitter_initialization == "hdr_gbuffer"
+            or config.training.associate_emitter_gaussians
+        ):
             validate_emitter_inclusive_geometry(Path(dnsplatter_checkpoint))
         else:
             validate_practical_geometry(Path(dnsplatter_checkpoint))
         if emitter_checkpoint is not None:
-            raise ValueError("Practical fresh training must initialize emitters from HDR, not a warm-start checkpoint")
+            raise ValueError("Practical fresh training must initialize emitters from its declared inputs, not a warm-start checkpoint")
     dataset = MultiViewSceneDataset(
         nerfstudio_dir,
         dnsplatter_checkpoint,
@@ -1121,6 +1279,7 @@ def train_shared_gaussians(
             bounds,
             tangent_margin=config.training.emitter_gaussian_tangent_margin,
             normal_fraction=config.training.emitter_gaussian_normal_fraction,
+            off_albedo=config.training.emitter_gaussian_off_albedo,
         )
         dataset.emitter_gaussian_association_diagnostic = association
         print(
@@ -1141,6 +1300,118 @@ def train_shared_gaussians(
     print(f"initialization checkpoint: {initialization_checkpoint}", flush=True)
     if initialize_only:
         print("initialization-only run complete; training iterations were not started", flush=True)
+        return
+    trainer.fit()
+
+
+def adapt_lighting(
+    base_checkpoint: str | Path,
+    nerfstudio_dir: str | Path,
+    output_path: str | Path,
+    steps: int,
+    device: str,
+    *,
+    checkpoint_every: int = 500,
+    expected_emitters: int | None = None,
+    emitter_lr: float = 1.0e-3,
+    max_views: int | None = None,
+    initialize_only: bool = False,
+) -> None:
+    """Fit only non-geometric emitter parameters on known-pose HDR views."""
+
+    if steps <= 0:
+        raise ValueError("lighting adaptation steps must be positive")
+    if checkpoint_every <= 0:
+        raise ValueError("lighting adaptation checkpoint interval must be positive")
+    if emitter_lr <= 0.0:
+        raise ValueError("lighting adaptation emitter LR must be positive")
+    if expected_emitters is not None and expected_emitters <= 0:
+        raise ValueError("expected emitter count must be positive")
+
+    base_checkpoint = Path(base_checkpoint).resolve()
+    scene, _, payload = load_checkpoint(base_checkpoint, device)
+    source_checkpoint = Path(payload["source_dnsplatter_checkpoint"]).resolve()
+    if not source_checkpoint.is_file():
+        raise FileNotFoundError(source_checkpoint)
+
+    config = config_from_dict(payload["config"])
+    config.training.steps = int(steps)
+    config.training.checkpoint_every = int(checkpoint_every)
+    config.training.geometry_lr = 0.0
+    config.training.optimize_scene_means = False
+    config.training.optimize_scene_scales = False
+    config.training.optimize_scene_rotations = False
+    config.training.optimize_scene_opacities = False
+    config.training.constrain_scene_scales = False
+    config.training.albedo_lr = 0.0
+    config.training.material_lr = 0.0
+    # The existing adaptation contract fits emitter appearance only.
+    config.training.indirect_lr = 0.0
+    if config.training.indirect_final_lr is not None:
+        config.training.indirect_final_lr = 0.0
+    config.training.emitter_lr = float(emitter_lr)
+    config.training.emitter_final_lr = float(emitter_lr)
+    config.training.emitter_representation = "planar_ellipse_2d"
+    config.training.emitter_initialization = "gt_mask_depth"
+    config.training.optimize_emitter_centers = False
+    config.training.optimize_emitter_rotations = False
+    config.training.optimize_emitter_scales = False
+    config.training.constrain_emitter_scales = False
+    config.training.freeze_start = int(steps)
+    config.training.freeze_end = int(steps) + 1
+    config.training.training_transport_mode = "secondary_only"
+    config.training.associate_emitter_gaussians = False
+    config.adaptive.enabled = False
+    config.scene_culling.enabled = False
+    config.render.camera_visible_emitters = True
+    config.render.six_axis_emission = True
+
+    dataset = MultiViewSceneDataset(
+        nerfstudio_dir,
+        source_checkpoint,
+        prior_dir=None,
+        image_size=config.raster.image_size,
+        max_views=max_views,
+        split="train",
+        allow_gt_emitter_initialization=True,
+    )
+    if dataset.observation_policy.get("domain") != "linear_hdr":
+        raise ValueError("lighting adaptation requires complete linear-HDR observations")
+    dataset.training_input_provenance = training_inputs(
+        dataset.root,
+        source_checkpoint,
+        dataset.prior_dir,
+    )
+    dataset.lighting_adaptation_provenance = {
+        "base_checkpoint": str(base_checkpoint),
+        "policy": "freeze_scene_geometry_and_brdf_fit_emitter_appearance_only",
+        "reset_previous_emitter_associations": True,
+    }
+
+    # Old source fixtures become ordinary non-emissive scene geometry in the
+    # new condition. Restore any tagged rows before introducing the new
+    # analytic lights; the novel fixtures themselves are absent from the map.
+    scene.emitter_ids.fill_(-1)
+    bounds = tuple(value.to(device) for value in scene.bounds(config.raster.bounds_quantile))
+    emitters = initialize_emitters(scene, dataset, bounds, config, device)
+    if expected_emitters is not None and emitters.num_emitters != expected_emitters:
+        raise ValueError(
+            f"expected {expected_emitters} HDR emitters, initialized {emitters.num_emitters}"
+        )
+
+    output_path = Path(output_path)
+    if getattr(dataset, "emitter_initialization_diagnostic", None) is not None:
+        write_json(
+            output_path.parent / "emitter_initialization.json",
+            dataset.emitter_initialization_diagnostic,
+        )
+    trainer = SharedGaussianTrainer(scene, dataset, emitters, config, output_path, device, bounds,
+                                    indirect_light=load_indirect_light(payload, device))
+    initialization_checkpoint = output_path.parent / "aegir_initialization.pt"
+    trainer._save(0, initialization_checkpoint)
+    print(f"lighting-adaptation initialization checkpoint: {initialization_checkpoint}", flush=True)
+    if initialize_only:
+        print("lighting-adaptation initialization-only run complete", flush=True)
         return
     trainer.fit()
 
@@ -1198,9 +1469,22 @@ def resume_shared_gaussians(
     )
     if dataset_meta.get("emitter_initialization_diagnostic") is not None:
         dataset.emitter_initialization_diagnostic = dataset_meta["emitter_initialization_diagnostic"]
-    if config.training.emitter_initialization in {"hdr_multiview", "hdr_predicted_depth"}:
-        validate_predicted_depth(dataset.root, dataset.metadata)
-        validate_practical_geometry(requested_source)
+    if config.training.emitter_initialization in {
+        "hdr_multiview",
+        "hdr_predicted_depth",
+        "hdr_gbuffer",
+        "sam3_mask_depth",
+        "sam3_multiview",
+    }:
+        if config.training.emitter_initialization not in {"hdr_multiview", "sam3_multiview"}:
+            validate_predicted_depth(dataset.root, dataset.metadata)
+        if (
+            config.training.emitter_initialization == "hdr_gbuffer"
+            or config.training.associate_emitter_gaussians
+        ):
+            validate_emitter_inclusive_geometry(requested_source)
+        else:
+            validate_practical_geometry(requested_source)
         actual_provenance = training_inputs(dataset.root, requested_source, dataset.prior_dir)
         if dataset_meta.get("input_provenance") != actual_provenance:
             raise ValueError("Resume input content differs from checkpoint provenance")

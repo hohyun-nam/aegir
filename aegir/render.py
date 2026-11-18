@@ -9,7 +9,9 @@ from .brdf import MicrofacetBRDF
 from .color import display_srgb
 from .config import RenderConfig
 from .emitters import AreaEmitterModel
+from .indirect import DIRECT_SH_MODE, GlobalDiffuseSH, validate_lighting_config
 from .math_utils import cosine_sample_hemisphere, safe_normalize
+from .sample_reduction import reduce_direct_samples
 from .visibility import resolve_visibility_parameters
 from .visibility import soft_visibility as _soft_visibility
 
@@ -33,8 +35,11 @@ class DeferredRenderer:
         transport_fn: TransportFn | None = None,
         *,
         scene_scale: float = 1.0,
+        indirect_light: GlobalDiffuseSH | None = None,
     ) -> None:
         self.config = config or RenderConfig()
+        validate_lighting_config(self.config)
+        self.indirect_light = indirect_light
         self.scene_scale = float(scene_scale)
         self.visibility_bias, self.visibility_steepness = resolve_visibility_parameters(
             self.config, self.scene_scale
@@ -78,7 +83,11 @@ class DeferredRenderer:
         else:
             gaussian_valid_flat = gaussian_valid.reshape(-1).bool()
         surface_ids = torch.nonzero(
-            gaussian_valid_flat & (emitter_mask.reshape(-1) < 0.5), as_tuple=False
+            gaussian_valid_flat & (
+                torch.ones_like(gaussian_valid_flat)
+                if self.config.tagged_surface_emission
+                else (emitter_mask.reshape(-1) < 0.5)
+            ), as_tuple=False
         ).flatten()
         direct_hdr = torch.zeros_like(albedo)
         indirect_hdr = torch.zeros_like(albedo)
@@ -87,25 +96,22 @@ class DeferredRenderer:
                 value.index_select(0, surface_ids)
                 for value in (points, normals, view_dirs, albedo, roughness, metallic)
             ]
-            brdf_direct, brdf_indirect, brdf_count = self._brdf_samples(
-                *surface_values,
-                emitters,
-                occluder_points,
-                generator,
-                transport_mode,
-                training_proxy_weight,
-            )
-            light_direct, light_indirect, light_count = self._light_samples(
-                *surface_values,
-                emitters,
-                occluder_points,
-                generator,
-                transport_mode,
-                training_proxy_weight,
-            )
-            sample_count = float(brdf_count + light_count)
-            surface_direct = (brdf_direct + light_direct) / sample_count
-            surface_indirect = (brdf_indirect + light_indirect) / sample_count
+            if self.config.lighting_mode == DIRECT_SH_MODE:
+                if self.indirect_light is None:
+                    raise ValueError("learned-indirect rendering requires an explicit indirect_light model")
+                light_direct, _, light_count = self._light_samples(
+                    *surface_values, emitters, occluder_points, generator,
+                    transport_mode, training_proxy_weight,
+                )
+                surface_direct = light_direct / max(1, light_count)
+                surface_indirect = self.indirect_light.diffuse(
+                    surface_values[1], surface_values[3], surface_values[5]
+                )
+            else:
+                surface_direct, surface_indirect = self._sample_explicit_transport(
+                    surface_values, emitters, occluder_points, generator,
+                    transport_mode, training_proxy_weight,
+                )
             gaussian_alpha = gbuffer.get("alpha")
             if gaussian_alpha is not None:
                 surface_alpha = gaussian_alpha.reshape(-1, 1).index_select(0, surface_ids)
@@ -135,6 +141,23 @@ class DeferredRenderer:
             "normals": gbuffer["normals"],
         }
 
+    def _sample_explicit_transport(
+        self, surface_values, emitters, occluder_points, generator,
+        transport_mode, training_proxy_weight,
+    ) -> tuple[Tensor, Tensor]:
+        brdf_direct, brdf_indirect, brdf_count = self._brdf_samples(
+            *surface_values, emitters, occluder_points, generator,
+            transport_mode, training_proxy_weight,
+        )
+        light_direct, light_indirect, light_count = self._light_samples(
+            *surface_values, emitters, occluder_points, generator,
+            transport_mode, training_proxy_weight,
+        )
+        sample_count = float(brdf_count + light_count)
+        surface_direct = (brdf_direct + light_direct) / sample_count
+        surface_indirect = (brdf_indirect + light_indirect) / sample_count
+        return surface_direct, surface_indirect
+
     def camera_visible_emission(
         self,
         gbuffer: dict[str, Tensor],
@@ -152,6 +175,21 @@ class DeferredRenderer:
         shape = gbuffer["points"].shape[:-1]
         zeros = gbuffer["points"].new_zeros(shape + (3,))
         zero_mask = gbuffer["points"].new_zeros(shape + (1,))
+        if self.config.tagged_surface_emission:
+            if not self.config.camera_visible_emitters or emitters.num_emitters == 0:
+                return zeros, zero_mask
+            weights = gbuffer.get('emitter_weights')
+            if weights is None or weights.shape[-1] != emitters.num_emitters:
+                raise ValueError('Tagged-surface rendering requires per-emitter camera weights')
+            outgoing = safe_normalize(gbuffer['view_dirs'], dim=-1)
+            emission = torch.zeros_like(zeros)
+            for index in range(emitters.num_emitters):
+                ids = torch.full(shape, index, device=outgoing.device, dtype=torch.long)
+                emission = emission + weights[..., index:index+1] * emitters.radiance_for_ids(
+                    outgoing, ids, axis_lobe_sharpness=self.config.emitter_axis_lobe_sharpness,
+                    use_axis_gains=self.config.six_axis_emission,
+                )
+            return emission, weights.sum(-1, keepdim=True).clamp(0, 1)
         required = {"camera_origins", "camera_ray_dirs", "surface_distances"}
         if (
             not self.config.camera_visible_emitters
@@ -255,16 +293,27 @@ class DeferredRenderer:
     ) -> tuple[Tensor, Tensor, int]:
         if emitters.num_emitters == 0 or self.config.num_light_samples <= 0:
             return torch.zeros_like(albedo), torch.zeros_like(albedo), 0
-        q, dirs, dist, ids = emitters.sample_surface_total(
-            points,
-            self.config.num_light_samples,
-            generator=generator,
+        sample_options = (
+            {} if self.config.light_sample_pattern == "iid"
+            else {"pattern": self.config.light_sample_pattern}
         )
+        if self.config.light_sampling_strategy == "solid_angle":
+            q, dirs, dist, ids, light_pdf = emitters.sample_solid_angle_total(
+                points, self.config.num_light_samples, generator=generator, **sample_options,
+            )
+        else:
+            q, dirs, dist, ids = emitters.sample_surface_total(
+                points, self.config.num_light_samples, generator=generator, **sample_options,
+            )
+            light_pdf = emitters.light_pdf_surrogate(dist, ids, dirs)
         del q
         ndotl = (normals[:, None] * dirs).sum(-1, keepdim=True).clamp_min(0.0)
         brdf_pdf = ndotl / torch.pi
-        light_pdf = emitters.light_pdf_surrogate(dist, ids, dirs)
-        mix_pdf = self._mix_pdf(brdf_pdf, light_pdf, emitters.num_emitters).clamp_min(self.config.eps)
+        # The exact PDF can legitimately be small for a highly elongated light.
+        # Keep the historical floor only on the unchanged surface estimator.
+        pdf_floor = (torch.finfo(light_pdf.dtype).tiny
+                     if self.config.light_sampling_strategy == "solid_angle" else self.config.eps)
+        mix_pdf = self._mix_pdf(brdf_pdf, light_pdf, emitters.num_emitters).clamp_min(pdf_floor)
         direct = emitters.radiance_for_ids(
             -dirs,
             ids,
@@ -289,7 +338,11 @@ class DeferredRenderer:
         indirect_contribution = torch.nan_to_num(
             fr * indirect_incident * ndotl / mix_pdf, nan=0.0, posinf=1.0e4, neginf=0.0
         )
-        return direct_contribution.sum(dim=1), indirect_contribution.sum(dim=1), dirs.shape[1]
+        direct_sum, retained_count = reduce_direct_samples(
+            direct_contribution, self.config.direct_sample_reduction,
+            self.config.direct_sample_keep_fraction,
+        )
+        return direct_sum, indirect_contribution.sum(dim=1), retained_count
 
     def _incident_transport(
         self,
@@ -306,6 +359,9 @@ class DeferredRenderer:
         """Apply AEGIR Equation 4 to one batch of primary samples."""
 
         origins = points[:, None, :].expand_as(dirs)
+        if self.config.lighting_mode == DIRECT_SH_MODE:
+            visibility = self._visibility(points, dirs, distances, occluder_points)
+            return direct_radiance * visibility, torch.zeros_like(direct_radiance)
         if self.transport_fn is None:
             visibility = self._visibility(points, dirs, distances, occluder_points)
             return direct_radiance * visibility, torch.zeros_like(direct_radiance)
@@ -423,6 +479,8 @@ class DeferredRenderer:
         return output
 
     def _mix_pdf(self, brdf_pdf: Tensor, light_pdf: Tensor, num_emitters: int) -> Tensor:
+        if self.config.lighting_mode == DIRECT_SH_MODE:
+            return light_pdf
         n_brdf = float(self.config.num_brdf_samples)
         n_light = float(self.config.num_light_samples if num_emitters > 0 else 0)
         return (n_brdf * brdf_pdf + n_light * light_pdf) / (n_brdf + n_light)

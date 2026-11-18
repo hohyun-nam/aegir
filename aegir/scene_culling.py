@@ -114,7 +114,13 @@ def refine_scene_gaussians(
         posinf=0.0,
         neginf=0.0,
     )
-    low_opacity = scene.opacities.flatten() < config.opacity_threshold
+    # Tagged fixture rows must survive an all-lights-on training run even
+    # though they are intentionally absent from its raster/transport.  They
+    # become ordinary BRDF geometry when the corresponding light is off.
+    low_opacity = (
+        (scene.opacities.flatten() < config.opacity_threshold)
+        & scene.background_mask
+    )
     high_gradient = average_xy_gradient > config.densify_grad_threshold
     large_world = scene.scales.amax(dim=-1) > config.densify_size_threshold
     large_screen = torch.zeros_like(large_world)

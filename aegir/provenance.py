@@ -144,6 +144,49 @@ def training_inputs(root: Path, geometry: Path, priors: Path | None = None) -> d
     return result
 
 
+def validate_sam3_ldr_view(root: Path) -> dict:
+    """Reject HDR/GT paths before a SAM surface initializer loads any frames."""
+    from .data import select_frame_indices
+
+    root = Path(root)
+    metadata = json.loads((root / 'transforms.json').read_text())
+    if metadata.get('emitter_mask_source') != 'sam3' or metadata.get(
+        'aegir_color', {}
+    ).get('observation_domain') != 'ldr':
+        raise ValueError('SAM3 surface initialization requires an explicit LDR SAM3 view')
+    forbidden_top = {'emitters', 'emitter_definitions', 'emitters_file_path', 'lighting_gt'}
+    forbidden_frame = {
+        'depth_file_path', 'normal_file_path', 'normal_world_file_path',
+        'normal_camera_file_path', 'albedo_gt_file_path', 'roughness_gt_file_path',
+        'metallic_gt_file_path', 'object_id_file_path', 'radiance_hdr_file_path',
+        'radiance_exr_file_path',
+    }
+    if forbidden_top.intersection(metadata) or any(
+        forbidden_frame.intersection(frame) for frame in metadata['frames']
+    ):
+        raise ValueError('SAM3 surface view contains forbidden HDR/GT supervision paths')
+    indices = select_frame_indices(metadata, metadata['frames'], 'train')
+    if not indices or any(not metadata['frames'][i].get('emitter_mask_path') for i in indices):
+        raise ValueError('Every SAM3 training frame must have a SAM mask')
+    provenance = metadata.get('sam3_provenance', {})
+    if not provenance.get('manifest_sha256') or len(provenance.get('frames', [])) != len(indices):
+        raise ValueError('SAM3 training view has incomplete cache provenance')
+    if sha256_file(Path(provenance['run']) / 'manifest.json') != provenance['manifest_sha256']:
+        raise ValueError('SAM3 inference manifest changed after view preparation')
+    for index, record in zip(indices, provenance['frames']):
+        frame = metadata['frames'][index]
+        for key, record_key, hash_key in (
+            ('file_path', 'image', 'rgb_sha256'),
+            ('emitter_mask_path', 'mask', 'mask_sha256'),
+        ):
+            path = (root / frame[key]).resolve()
+            if path != Path(record[record_key]).resolve():
+                raise ValueError('SAM3 frame/cache provenance path mismatch')
+            if record.get(hash_key) and sha256_file(path) != record[hash_key]:
+                raise ValueError(f'SAM3 input content changed: {path}')
+    return metadata
+
+
 def validate_practical_geometry(geometry: Path) -> dict:
     geometry = Path(geometry)
     manifest = geometry.with_suffix(geometry.suffix + ".provenance.json")
@@ -160,15 +203,24 @@ def validate_practical_geometry(geometry: Path) -> dict:
     view = request.get("inputs", {}).get("view_provenance", {}).get("request", {})
     depth = view.get("inputs", {}).get("depth", {})
     seed = view.get("inputs", {}).get("seed_provenance", {}).get("request", {})
+    seed_is_practical = (
+        seed.get("kind") == "depth_seed"
+        and seed.get("settings", {}).get("allow_gt_depth") is False
+    ) or (
+        seed.get("kind") == "fixed_pose_triangulated_seed"
+        and seed.get("settings", {}).get("uses_gt_depth") is False
+        and seed.get("settings", {}).get("poses_fixed") is True
+    )
     if (
         view.get("kind") != "native_2dgs_view"
         or view.get("settings", {}).get("allow_unverified_depth") is not False
         or depth.get("origin") != "rgb_model"
         or depth.get("gt_alignment") is not False
-        or seed.get("kind") != "depth_seed"
-        or seed.get("settings", {}).get("allow_gt_depth") is not False
+        or not seed_is_practical
     ):
-        raise ValueError("Geometry does not prove a model-depth seed and native training view")
+        raise ValueError(
+            "Geometry does not prove a practical RGB-depth/triangulated seed and native training view"
+        )
     return stored
 
 
@@ -181,7 +233,7 @@ def validate_emitter_inclusive_geometry(geometry: Path) -> dict:
     if view["settings"].get("exclude_emitters") is not False:
         raise ValueError("Emitter association requires emitter-inclusive native 2DGS supervision")
     if seed["settings"].get("exclude_emitter_masks") is not False:
-        raise ValueError("Emitter association requires an emitter-inclusive model-depth seed")
+        raise ValueError("Emitter association requires an emitter-inclusive geometry seed")
     return stored
 
 
@@ -199,6 +251,34 @@ def validate_model_depth_seed(seed: Path) -> dict:
     return stored
 
 
+def validate_practical_seed(seed: Path) -> dict:
+    """Validate a geometry seed that uses no GT depth or radiance.
+
+    A native view may start either from RGB-model depth or from feature tracks
+    triangulated with fixed, supplied camera poses.  The latter is metric in
+    the camera-pose coordinate system and avoids monocular-depth scale bias.
+    """
+
+    seed = Path(seed)
+    manifest = seed.with_suffix(seed.suffix + ".provenance.json")
+    stored = json.loads(manifest.read_text())
+    request = stored.get("request", {})
+    settings = request.get("settings", {})
+    valid = (
+        request.get("kind") == "depth_seed"
+        and settings.get("allow_gt_depth") is False
+    ) or (
+        request.get("kind") == "fixed_pose_triangulated_seed"
+        and settings.get("uses_gt_depth") is False
+        and settings.get("poses_fixed") is True
+    )
+    if not valid or stored.get("output_sha256") != sha256_file(seed):
+        raise ValueError(
+            "Seed must be certified RGB-model depth or fixed-pose RGB triangulation"
+        )
+    return stored
+
+
 def validate_native_view(root: Path) -> dict:
     root = Path(root)
     validate_depth_directory(root / "mono_depth")
@@ -211,5 +291,5 @@ def validate_native_view(root: Path) -> dict:
         or stored.get("derived_signature") != dataset_signature(root)
     ):
         raise ValueError("Unverified/changed native 2DGS view; rebuild from model depth")
-    validate_model_depth_seed(root / "point_cloud.ply")
+    validate_practical_seed(root / "point_cloud.ply")
     return stored

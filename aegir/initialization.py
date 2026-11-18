@@ -17,6 +17,7 @@ def associate_gaussians_with_emitters(
     *,
     tangent_margin: float = 1.05,
     normal_fraction: float = 0.001,
+    off_albedo: float = 0.5,
 ) -> dict:
     """Associate inclusive source surfels with recovered analytic emitters.
 
@@ -29,6 +30,8 @@ def associate_gaussians_with_emitters(
         raise ValueError("emitter Gaussian tangent margin must be positive")
     if normal_fraction <= 0.0:
         raise ValueError("emitter Gaussian normal fraction must be positive")
+    if not 0.0 < off_albedo < 1.0:
+        raise ValueError("emitter Gaussian off albedo must be in (0, 1)")
     if emitters.num_emitters == 0:
         scene.emitter_ids.fill_(-1)
         return {"method": "analytic_support", "tagged": 0, "background": scene.gaussian_count, "counts": []}
@@ -63,6 +66,10 @@ def associate_gaussians_with_emitters(
         torch.full_like(best_ids, -1),
     )
     scene.emitter_ids.copy_(assigned.to(scene.emitter_ids))
+    tagged = assigned >= 0
+    if bool(tagged.any()):
+        off_logit = math.log(float(off_albedo) / (1.0 - float(off_albedo)))
+        scene.albedo_logits[tagged] = off_logit
     counts = [int((assigned == index).sum().cpu()) for index in range(emitters.num_emitters)]
     return {
         "method": "analytic_support",
@@ -72,6 +79,7 @@ def associate_gaussians_with_emitters(
         "tangent_margin": float(tangent_margin),
         "normal_fraction": float(normal_fraction),
         "normal_tolerance": float(normal_floor.cpu()),
+        "off_albedo": float(off_albedo),
     }
 
 
@@ -276,6 +284,187 @@ def seed_planar_emitters_from_masks(
         torch.stack(emitter_colors),
         torch.stack(quaternions),
     ))
+
+
+def seed_emitters_from_mask_pointcloud(
+    frames: list,
+    gbuffers: list[dict[str, Tensor]],
+    bounds: tuple[Tensor, Tensor],
+    *,
+    min_views: int = 3,
+    min_fraction: float = 0.05,
+    persistence_voxel_fraction: float = 0.0025,
+    dbscan_eps_fraction: float = 0.01,
+    min_cluster_voxels: int = 8,
+    min_scale_fraction: float = 0.002,
+    max_emitters: int = 16,
+) -> tuple[AreaEmitterModel, dict]:
+    """Project SAM masks onto rendered 2DGS points, then DBSCAN and PCA-fit.
+
+    Each masked pixel contributes its calibrated 2DGS surface point.  Repeated
+    observations are first collapsed into metric voxels and must be supported
+    by several distinct views before DBSCAN.  This consumes neither HDR nor an
+    external/predicted depth map.
+    """
+
+    import numpy as np
+
+    if len(frames) != len(gbuffers) or not frames:
+        raise ValueError("frames and G-buffers must be non-empty and have matching lengths")
+    if min_views < 1 or not 0.0 <= min_fraction <= 1.0:
+        raise ValueError("invalid multi-view persistence settings")
+    if persistence_voxel_fraction <= 0 or dbscan_eps_fraction <= 0:
+        raise ValueError("point-cloud voxel and DBSCAN fractions must be positive")
+    if min_cluster_voxels < 3 or max_emitters < 1:
+        raise ValueError("point-cloud clusters need at least three voxels and one emitter slot")
+
+    bmin = torch.as_tensor(bounds[0]).detach().cpu().float()
+    bmax = torch.as_tensor(bounds[1]).detach().cpu().float()
+    scene_scale = float((bmax - bmin).norm().clamp_min(1.0e-6))
+    voxel_size = scene_scale * float(persistence_voxel_fraction)
+    dbscan_eps = scene_scale * float(dbscan_eps_fraction)
+    required_views = min(
+        len(frames), max(int(min_views), math.ceil(len(frames) * float(min_fraction)))
+    )
+
+    point_blocks, color_blocks, camera_blocks, view_blocks = [], [], [], []
+    for view, (frame, gbuffer) in enumerate(zip(frames, gbuffers, strict=True)):
+        if frame.emitter_mask is None:
+            raise ValueError("SAM point-cloud initialization requires an emitter mask in every view")
+        points = gbuffer["points"].detach().cpu().float()
+        valid = gbuffer["valid_mask"].detach().cpu()[..., 0].bool()
+        mask = (
+            frame.emitter_mask.detach().cpu()[..., 0].bool()
+            & frame.mask.detach().cpu()[..., 0].bool()
+            & valid
+            & torch.isfinite(points).all(dim=-1)
+        )
+        in_bounds = ((points >= bmin) & (points <= bmax)).all(dim=-1)
+        mask &= in_bounds
+        if not bool(mask.any()):
+            continue
+        selected = points[mask]
+        point_blocks.append(selected)
+        color_blocks.append(frame.target.detach().cpu().float()[mask])
+        camera_origins = gbuffer.get("camera_origins")
+        if camera_origins is None:
+            camera = torch.as_tensor(frame.camera["c2w"], dtype=selected.dtype)[:3, 3]
+            camera_blocks.append(camera.expand(selected.shape[0], 3))
+        else:
+            camera_blocks.append(camera_origins.detach().cpu().float()[mask])
+        view_blocks.append(torch.full((selected.shape[0],), view, dtype=torch.long))
+    if not point_blocks:
+        raise ValueError("SAM masks contain no valid rendered 2DGS surface points")
+
+    raw_points = torch.cat(point_blocks).numpy()
+    raw_colors = torch.cat(color_blocks).numpy()
+    raw_cameras = torch.cat(camera_blocks).numpy()
+    raw_views = torch.cat(view_blocks).numpy()
+    voxel_coordinates = np.floor((raw_points - bmin.numpy()) / voxel_size).astype(np.int32)
+    _, inverse = np.unique(voxel_coordinates, axis=0, return_inverse=True)
+    voxel_count = int(inverse.max()) + 1
+    view_pairs = np.unique(inverse.astype(np.int64) * len(frames) + raw_views)
+    pair_voxels = view_pairs // len(frames)
+    support = np.bincount(pair_voxels, minlength=voxel_count)
+    persistent = support >= required_views
+    if not bool(persistent.any()):
+        raise ValueError(
+            "No SAM-masked 2DGS points persist across the required number of views"
+        )
+
+    counts = np.bincount(inverse, minlength=voxel_count).astype(np.float64)
+
+    def voxel_means(values):
+        sums = np.stack(
+            [np.bincount(inverse, weights=values[:, axis], minlength=voxel_count)
+             for axis in range(values.shape[1])],
+            axis=1,
+        )
+        return sums[persistent] / counts[persistent, None]
+
+    points = torch.from_numpy(voxel_means(raw_points)).float()
+    colors = torch.from_numpy(voxel_means(raw_colors)).float()
+    cameras = torch.from_numpy(voxel_means(raw_cameras)).float()
+    voxel_support = torch.from_numpy(support[persistent]).long()
+    labels = _cluster_points(points, dbscan_eps, min_samples=3)
+    clusters = [
+        int(value)
+        for value in labels.unique().tolist()
+        if int(value) >= 0 and int((labels == value).sum()) >= min_cluster_voxels
+    ]
+    clusters.sort(
+        key=lambda index: (
+            int(voxel_support[labels == index].sum()),
+            int((labels == index).sum()),
+        ),
+        reverse=True,
+    )
+    clusters = clusters[:max_emitters]
+    if not clusters:
+        raise ValueError("DBSCAN found no persistent SAM-masked 2DGS point clusters")
+
+    scale_floor = scene_scale * float(min_scale_fraction)
+    centers, scales, quaternions, emitter_colors, records = [], [], [], [], []
+    for emitter_id, cluster in enumerate(clusters):
+        selected = labels == cluster
+        cluster_points = points[selected]
+        cluster_cameras = cameras[selected]
+        center = cluster_points.mean(dim=0)
+        centered = cluster_points - center
+        covariance = centered.T @ centered / max(1, cluster_points.shape[0] - 1)
+        _, axes = torch.linalg.eigh(covariance)
+        axes = axes[:, [2, 1, 0]]
+        if torch.linalg.det(axes) < 0:
+            axes[:, -1] = -axes[:, -1]
+        toward_cameras = cluster_cameras.mean(dim=0) - center
+        if torch.dot(axes[:, 2], toward_cameras) < 0:
+            axes[:, 0] = -axes[:, 0]
+            axes[:, 2] = -axes[:, 2]
+        local = centered @ axes
+        lower = torch.quantile(local, 0.01, dim=0)
+        upper = torch.quantile(local, 0.99, dim=0)
+        midpoint = 0.5 * (lower + upper)
+        center = center + axes @ midpoint
+        scale = (0.5 * (upper[:2] - lower[:2])).clamp_min(scale_floor)
+        centers.append(center)
+        scales.append(scale)
+        quaternions.append(_matrix_to_quat(axes))
+        emitter_colors.append(torch.quantile(colors[selected], 0.5, dim=0).clamp_min(1.0e-3))
+        records.append(
+            {
+                "id": emitter_id,
+                "center": center.tolist(),
+                "scales": scale.tolist(),
+                "cluster_voxels": int(selected.sum()),
+                "support_sum": int(voxel_support[selected].sum()),
+                "support_median_views": float(voxel_support[selected].float().median()),
+            }
+        )
+
+    emitters = match_initial_radiance(
+        AreaEmitterModel(
+            torch.stack(centers),
+            torch.stack(scales),
+            torch.stack(emitter_colors),
+            torch.stack(quaternions),
+        )
+    )
+    return emitters, {
+        "method": "sam3_2dgs_pointcloud_dbscan",
+        "uses_hdr_observations": False,
+        "uses_depth_for_position": False,
+        "uses_predicted_depth": False,
+        "uses_gt_emitters": False,
+        "uses_2dgs_surface_points": True,
+        "views": len(frames),
+        "required_views": required_views,
+        "raw_mask_points": int(raw_points.shape[0]),
+        "persistent_voxels": int(persistent.sum()),
+        "voxel_size": float(voxel_size),
+        "dbscan_eps": float(dbscan_eps),
+        "emitter_count": len(records),
+        "emitters": records,
+    }
 
 
 def restore_ellipsoid_support(

@@ -18,7 +18,7 @@ from .data import (
     saved_pose_to_model_transform,
     transform_camera,
 )
-from .denoising import cross_bilateral_denoise
+from .denoising import cross_bilateral_denoise, edge_aware_vector_median_denoise
 from .emitter_inspection import create_emitter_evolution_outputs
 from .evaluation import (
     build_lpips_model,
@@ -29,10 +29,40 @@ from .evaluation import (
 )
 from .gaussian_scene import GaussianMaterialBackend
 from .irgs_tracer import IRGSVisibilityTracer
+from .indirect import DIRECT_SH_MODE, GlobalDiffuseSH, load_indirect_light
 from .math_utils import linear_to_srgb
 from .render import DeferredRenderer
+from .sample_reduction import central80_bounds, central_fraction_bounds
 from .trainer import initialize_emitters
 from .visibility import scene_scale_from_bounds
+
+
+def configure_inference_sampling(
+    config,
+    render_samples: int | None = None,
+    direct_sample_reduction: str | None = None,
+    direct_sample_keep_percent: float | None = None,
+) -> None:
+    """Inference-only defaults; never modify training or saved checkpoint config."""
+    from .indirect import validate_lighting_config
+
+    samples = 128 if render_samples is None else render_samples
+    if samples <= 0:
+        raise ValueError("render_samples must be positive")
+    learned_indirect = config.render.lighting_mode == DIRECT_SH_MODE
+    config.render.num_light_samples = samples
+    config.render.num_brdf_samples = 0 if learned_indirect else samples
+    config.render.direct_sample_reduction = (
+        direct_sample_reduction if direct_sample_reduction is not None
+        else ("trimmed" if learned_indirect else "mean")
+    )
+    config.render.direct_sample_keep_fraction = .9
+    if direct_sample_keep_percent is not None:
+        if direct_sample_reduction not in (None, "trimmed"):
+            raise ValueError("direct_sample_keep_percent requires reduction trimmed")
+        config.render.direct_sample_reduction = "trimmed"
+        config.render.direct_sample_keep_fraction = direct_sample_keep_percent / 100.0
+    validate_lighting_config(config.render)
 
 
 def _camera_to(camera: dict, device: str) -> dict:
@@ -59,12 +89,17 @@ def render_full_frame(
     generator: torch.Generator | None = None,
     transport_mode: str = "inference",
     excluded_emitter_ids: tuple[int, ...] | None = None,
+    indirect_light: GlobalDiffuseSH | None = None,
 ) -> dict[str, Tensor]:
     gbuffer = scene.rasterize(
         camera,
         alpha_threshold=config.raster.alpha_threshold,
         rasterize_mode=config.raster.rasterize_mode,
         excluded_emitter_ids=excluded_emitter_ids,
+        include_emitter_gaussians=config.render.tagged_surface_emission,
+        camera_emitter_ids=((excluded_emitter_ids if excluded_emitter_ids is not None
+                             else tuple(range(emitters.num_emitters)))
+                            if config.render.tagged_surface_emission else None),
     )
     height, width = gbuffer["points"].shape[:2]
     scene_scale = scene_scale_from_bounds(scene.bounds(config.raster.bounds_quantile))
@@ -84,6 +119,7 @@ def render_full_frame(
             visibility_tracer.trace_transport if visibility_tracer is not None else None
         ),
         scene_scale=scene_scale,
+        indirect_light=indirect_light,
     )
     outputs: dict[str, list[Tensor]] = {}
     for start in range(0, height * width, chunk_size):
@@ -132,7 +168,7 @@ def inspect_checkpoint(
     output_dir: str | Path,
     device: str,
     max_views: int | None = None,
-    render_samples: int = 128,
+    render_samples: int | None = None,
     bounce_samples: int | None = None,
     split: str = "test",
     evaluation_seed: int = 2026,
@@ -140,6 +176,8 @@ def inspect_checkpoint(
     training_sh_proxy: bool = False,
     symmetric_emission: bool = False,
     denoise_indirect: bool = False,
+    median_indirect: bool = True,
+    median_radius: int = 1,
     denoiser_radius: int = 2,
     denoiser_sigma_spatial: float = 2.0,
     denoiser_sigma_depth: float = 1.0,
@@ -147,7 +185,15 @@ def inspect_checkpoint(
     denoiser_depth_epsilon: float = 1.0e-3,
     active_emitter_indices: tuple[int, ...] | None = None,
     evaluation_seed_by_view_order: bool = False,
+    image_size: int | tuple[int, int] | None = None,
+    light_sample_pattern: str | None = None,
+    frame_indices: tuple[int, ...] | None = None,
+    light_sampling_strategy: str | None = None,
+    direct_sample_reduction: str | None = None,
+    direct_sample_keep_percent: float | None = None,
 ) -> None:
+    if light_sample_pattern is not None and light_sample_pattern not in ("iid", "rqmc"):
+        raise ValueError("light_sample_pattern must be iid or rqmc")
     scene, emitters, payload = load_checkpoint(checkpoint, device)
     original_emitter_count = emitters.num_emitters
     if active_emitter_indices is not None:
@@ -155,8 +201,16 @@ def inspect_checkpoint(
     else:
         active_emitter_indices = tuple(range(original_emitter_count))
     config = config_from_dict(payload["config"])
-    config.render.num_brdf_samples = render_samples
-    config.render.num_light_samples = render_samples
+    if light_sample_pattern is not None:
+        config.render.light_sample_pattern = light_sample_pattern
+    if light_sampling_strategy is not None:
+        config.render.light_sampling_strategy = light_sampling_strategy
+    configure_inference_sampling(config, render_samples, direct_sample_reduction, direct_sample_keep_percent)
+    indirect_light = load_indirect_light(payload, device)
+    if image_size is not None:
+        from .data import image_dimensions
+        image_dimensions(image_size)
+        config.raster.image_size = image_size
     if symmetric_emission:
         config.render.six_axis_emission = False
     if bounce_samples is not None:
@@ -172,6 +226,12 @@ def inspect_checkpoint(
         split=split,
     )
     output_dir = Path(output_dir)
+    selected_frames = dataset.frames
+    if frame_indices is not None:
+        requested = set(frame_indices)
+        selected_frames = [frame for frame in dataset.frames if frame.index in requested]
+        if not requested or {frame.index for frame in selected_frames} != requested:
+            raise ValueError("frame_indices must be nonempty and present in the selected dataset split")
     compare_dir = output_dir / "target_render_compare_frames"
     raw_dir = output_dir / "raw_metric_frames"
     compare_dir.mkdir(parents=True, exist_ok=True)
@@ -203,7 +263,7 @@ def inspect_checkpoint(
         if saved_observation is None:
             raise ValueError("LDR checkpoint has no saved learned-exposure state")
         learned_exposure = saved_observation["log_exposure"].exp()
-    for view_order, frame in enumerate(dataset.frames):
+    for view_order, frame in enumerate(selected_frames):
         seed_offset = view_order if evaluation_seed_by_view_order else frame.index
         frame_seed = evaluation_seed + seed_offset
         generator = torch.Generator(device=torch.device(device)).manual_seed(frame_seed)
@@ -216,23 +276,34 @@ def inspect_checkpoint(
             generator=generator,
             transport_mode="training" if training_sh_proxy else "inference",
             excluded_emitter_ids=active_emitter_indices,
+            indirect_light=indirect_light,
         )
-        if denoise_indirect:
+        if median_indirect or denoise_indirect:
             surface_mask = (
                 (rendered["alpha"][..., 0] >= config.raster.alpha_threshold)
                 & (rendered["emitter_mask"][..., 0] < 0.5)
             )
-            rendered["indirect_hdr"] = cross_bilateral_denoise(
-                rendered["indirect_hdr"],
-                rendered["depth"],
-                rendered["normals"],
-                surface_mask,
-                radius=denoiser_radius,
-                sigma_spatial=denoiser_sigma_spatial,
-                sigma_depth=denoiser_sigma_depth,
-                normal_power=denoiser_normal_power,
-                depth_epsilon=denoiser_depth_epsilon,
-            )
+            if median_indirect:
+                rendered["indirect_hdr"] = edge_aware_vector_median_denoise(
+                    rendered["indirect_hdr"],
+                    rendered["depth"],
+                    rendered["normals"],
+                    surface_mask,
+                    radius=median_radius,
+                    depth_epsilon=denoiser_depth_epsilon,
+                )
+            if denoise_indirect:
+                rendered["indirect_hdr"] = cross_bilateral_denoise(
+                    rendered["indirect_hdr"],
+                    rendered["depth"],
+                    rendered["normals"],
+                    surface_mask,
+                    radius=denoiser_radius,
+                    sigma_spatial=denoiser_sigma_spatial,
+                    sigma_depth=denoiser_sigma_depth,
+                    normal_power=denoiser_normal_power,
+                    depth_epsilon=denoiser_depth_epsilon,
+                )
             rendered["hdr"] = (
                 rendered["direct_hdr"] + rendered["indirect_hdr"] + rendered["emission_hdr"]
             )
@@ -319,7 +390,25 @@ def inspect_checkpoint(
                 else "evaluation_seed + original_frame_index"
             ),
             "num_brdf_samples": config.render.num_brdf_samples,
+            "lighting_mode": config.render.lighting_mode,
+            "indirect_model": "global_diffuse_sh_degree2" if indirect_light is not None else "explicit_transport",
+            "indirect_relighting_policy": "fixed_captured_irradiance" if indirect_light is not None else "emitter_transport",
             "num_light_samples": config.render.num_light_samples,
+            "light_sample_pattern": config.render.light_sample_pattern,
+            "light_sampling_strategy": config.render.light_sampling_strategy,
+            "direct_sample_reduction": config.render.direct_sample_reduction,
+            "direct_sample_keep_fraction": (
+                .8 if config.render.direct_sample_reduction == "trimmed80" else
+                config.render.direct_sample_keep_fraction if config.render.direct_sample_reduction == "trimmed" else 1.0
+            ),
+            "num_emitter_samples_retained": (
+                central80_bounds(config.render.num_light_samples)[1] - central80_bounds(config.render.num_light_samples)[0]
+                if config.render.direct_sample_reduction == "trimmed80" else
+                central_fraction_bounds(config.render.num_light_samples, config.render.direct_sample_keep_fraction)[1]
+                - central_fraction_bounds(config.render.num_light_samples, config.render.direct_sample_keep_fraction)[0]
+                if config.render.direct_sample_reduction == "trimmed" else config.render.num_light_samples
+            ),
+            "requested_frame_indices": list(frame_indices) if frame_indices is not None else None,
             "num_bounce_samples": config.render.num_bounce_samples,
             "original_emitter_count": original_emitter_count,
             "active_emitter_indices": list(active_emitter_indices),
@@ -346,19 +435,30 @@ def inspect_checkpoint(
             "linear_hdr_saved": True,
             "visualization_denoiser": (
                 {
-                    "type": "cross_bilateral_indirect_hdr",
+                    "type": (
+                        "edge_aware_vector_median_then_cross_bilateral_indirect_hdr"
+                        if median_indirect and denoise_indirect
+                        else (
+                            "edge_aware_vector_median_indirect_hdr"
+                            if median_indirect
+                            else "cross_bilateral_indirect_hdr"
+                        )
+                    ),
+                    "median_radius": median_radius if median_indirect else None,
                     "radius": denoiser_radius,
                     "sigma_spatial": denoiser_sigma_spatial,
                     "sigma_depth": denoiser_sigma_depth,
                     "normal_power": denoiser_normal_power,
                     "depth_epsilon": denoiser_depth_epsilon,
                 }
-                if denoise_indirect
+                if median_indirect or denoise_indirect
                 else "none"
             ),
-            "paper_inference_bounce_ready": not training_sh_proxy,
-            "training_sh_proxy_used": training_sh_proxy,
+            "paper_inference_bounce_ready": not training_sh_proxy and indirect_light is None,
+            "training_sh_proxy_used": training_sh_proxy and indirect_light is None,
             "bounce_policy": (
+                "emitter-only direct visibility + learned global diffuse SH; no secondary rays"
+                if indirect_light is not None else
                 "frozen DN full-SH at the first Gaussian hit; diagnostic reconstruction mode"
                 if training_sh_proxy
                 else (
@@ -367,7 +467,13 @@ def inspect_checkpoint(
                     "miss equals zero"
                 )
             ),
-            "split_protocol": dataset.split_protocol,
+            "split_protocol": (
+                dataset.split_protocol if frame_indices is None else {
+                    **dataset.split_protocol,
+                    "evaluated_frames": len(metrics),
+                    "frame_filter": list(frame_indices),
+                }
+            ),
         },
         "metrics": metrics,
     }
@@ -378,7 +484,7 @@ def inspect_checkpoint(
                 initial_emitter_state,
                 "cpu",
                 preserve_3d=payload.get("format")
-                in {"aegir_shared_gaussian_v15", "aegir_shared_gaussian_v16"},
+                in {"aegir_shared_gaussian_v15", "aegir_shared_gaussian_v16", "aegir_shared_gaussian_v17"},
             )
         )
         index = torch.tensor(active_emitter_indices, dtype=torch.long)
@@ -388,7 +494,7 @@ def inspect_checkpoint(
         create_emitter_evolution_outputs(
             initial_emitter_state,
             emitter_state_dict(emitters),
-            dataset.frames,
+            selected_frames,
             scene.means,
             scene.bounds(config.raster.bounds_quantile),
             output_dir,
@@ -435,7 +541,7 @@ def inspect_emitter_evolution(
                 initial_state,
                 "cpu",
                 preserve_3d=payload.get("format")
-                in {"aegir_shared_gaussian_v15", "aegir_shared_gaussian_v16"},
+                in {"aegir_shared_gaussian_v15", "aegir_shared_gaussian_v16", "aegir_shared_gaussian_v17"},
             )
         )
     output_dir = Path(output_dir)
@@ -469,8 +575,10 @@ def load_camera_path(
         raise ValueError(f"{transforms_path} has no frames")
     dataparser = load_dataparser_transform(infer_dataparser_transform_path(Path(dnsplatter_checkpoint)))
     saved_to_model = saved_pose_to_model_transform(dataparser, metadata)
-    source_width = float(metadata.get("w", image_size))
-    source_height = float(metadata.get("h", image_size))
+    from .data import image_dimensions
+    height, width = image_dimensions(image_size)
+    source_width = float(metadata.get("w", width))
+    source_height = float(metadata.get("h", height))
     cameras = []
     for frame in frames:
         fx = float(frame.get("fl_x", metadata.get("fl_x")))
@@ -479,12 +587,12 @@ def load_camera_path(
         cy = float(frame.get("cy", metadata.get("cy", source_height * 0.5)))
         camera = {
             "c2w": torch.as_tensor(frame["transform_matrix"], dtype=torch.float32),
-            "fx": fx * image_size / source_width,
-            "fy": fy * image_size / source_height,
-            "cx": cx * image_size / source_width,
-            "cy": cy * image_size / source_height,
-            "width": image_size,
-            "height": image_size,
+            "fx": fx * width / source_width,
+            "fy": fy * height / source_height,
+            "cx": cx * width / source_width,
+            "cy": cy * height / source_height,
+            "width": width,
+            "height": height,
             "camera_convention": "opengl",
         }
         cameras.append(transform_camera(camera, saved_to_model))
@@ -497,14 +605,16 @@ def render_camera_path(
     output_dir: str | Path,
     device: str,
     max_frames: int | None = None,
-    render_samples: int = 16,
+    render_samples: int | None = None,
     light_scale: float = 1.0,
     symmetric_emission: bool = False,
+    direct_sample_reduction: str | None = None,
+    direct_sample_keep_percent: float | None = None,
 ) -> None:
     scene, emitters, payload = load_checkpoint(checkpoint, device)
     config = config_from_dict(payload["config"])
-    config.render.num_brdf_samples = render_samples
-    config.render.num_light_samples = render_samples
+    indirect_light = load_indirect_light(payload, device)
+    configure_inference_sampling(config, render_samples, direct_sample_reduction, direct_sample_keep_percent)
     if symmetric_emission:
         config.render.six_axis_emission = False
     cameras = load_camera_path(
@@ -531,6 +641,7 @@ def render_camera_path(
             _camera_to(camera, device),
             config,
             visibility_tracer=visibility_tracer,
+            indirect_light=indirect_light,
         )
         Image.fromarray(_to_u8(rendered["rgb"])).save(output_dir / f"frame_{index:04d}.png")
     print(f"rendered {len(cameras)} novel/path views to {output_dir}")

@@ -309,6 +309,7 @@ class GaussianMaterialBackend(nn.Module):
         *,
         include_emitter_gaussians: bool = False,
         excluded_emitter_ids: Sequence[int] | Tensor | None = None,
+        camera_emitter_ids: Sequence[int] | None = None,
     ) -> dict[str, Tensor]:
         try:
             from diff_surfel_rasterization import GaussianRasterizationSettings, GaussianRasterizer
@@ -430,7 +431,20 @@ class GaussianMaterialBackend(nn.Module):
             torch.full_like(surface_distances, torch.inf),
         )
         _ = rasterize_mode
+        emission_attributes = {}
+        if camera_emitter_ids is not None:
+            weights = []
+            for start in range(0, len(camera_emitter_ids), 3):
+                attributes = torch.zeros_like(self.means)
+                group = camera_emitter_ids[start:start + 3]
+                for channel, emitter_id in enumerate(group):
+                    attributes[:, channel] = (self.emitter_ids == emitter_id).to(attributes)
+                rendered_weights, _, _, _ = render_attributes(attributes)
+                weights.append(rendered_weights[..., :len(group)])
+            if weights:
+                emission_attributes['emitter_weights'] = torch.cat(weights, dim=-1).clamp(0, 1)
         return {
+            **emission_attributes,
             "points": points,
             "normals": normal,
             "view_dirs": view_dirs,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from functools import lru_cache
+
 import torch
 from torch import Tensor
 
@@ -92,6 +94,43 @@ def cosine_sample_hemisphere(num: int, normals: Tensor, generator=None) -> Tenso
         + local[..., 2:3] * n[:, None]
     )
     return safe_normalize(world, dim=-1).reshape(normals.shape[:-1] + (num, 3))
+
+
+@lru_cache(maxsize=128)
+def _balanced_hammersley_pattern(num_samples: int, emitters: int, device, dtype) -> Tensor:
+    """Interleaved Hammersley sets, each sized to its emitter's actual budget."""
+    def radical_inverse(index: int) -> float:
+        result, weight = 0.0, 0.5
+        while index:
+            result += (index & 1) * weight
+            index >>= 1
+            weight *= 0.5
+        return result
+
+    quotient, remainder = divmod(num_samples, emitters)
+    uv = []
+    for slot in range(num_samples):
+        count = quotient + int(slot % emitters < remainder)
+        ordinal = slot // emitters
+        uv.append(((ordinal + 0.5) / count, radical_inverse(ordinal)))
+    return torch.tensor(uv, device=device, dtype=dtype)
+
+
+def balanced_rqmc_uv(emitter_ids: Tensor, num_emitters: int, dtype, generator=None) -> Tensor:
+    """Randomized low-discrepancy samples without changing emitter allocation.
+
+    Each pixel/emitter receives an independent uniform toroidal (Cranley-Patterson)
+    shift. Every sample therefore retains the original uniform UV marginal;
+    samples within an emitter are deliberately correlated to improve coverage.
+    The ID order must be the balanced cyclic order of sample_surface_total.
+    This improves placement, NOT the historical ellipsoid PDF surrogate.
+    """
+    batch, count = emitter_ids.shape
+    base = _balanced_hammersley_pattern(count, num_emitters, emitter_ids.device, dtype)
+    shifts = torch.rand((batch, num_emitters, 2), device=emitter_ids.device,
+                        dtype=dtype, generator=generator)
+    selected = shifts.gather(1, emitter_ids[..., None].expand(-1, -1, 2))
+    return (base[None] + selected).remainder(1.0)
 
 
 def uniform_sample_sphere(shape: tuple[int, ...], device, dtype, generator=None) -> Tensor:

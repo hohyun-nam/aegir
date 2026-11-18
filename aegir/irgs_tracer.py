@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import ctypes
+import os
 from collections.abc import Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import torch
@@ -61,6 +64,51 @@ _BVH_PROXY_THICKNESS_FRACTION = 1.0e-6
 _IRGS_MAX_FEATURE_SIZE = 12
 _IRGS_MAX_SH_DEGREE = 3
 _IRGS_TRACE_MAX_DISTANCE = 100.0
+_PINNED_OPTIX_DRIVER_VERSION = "580.173.02"
+_PINNED_OPTIX_LOADED = False
+
+
+def _load_workspace_pinned_optix() -> None:
+    """Preload the validated OptiX runtime when this workspace provides it.
+
+    Container restarts clear ``LD_LIBRARY_PATH``.  The native IRGS extension
+    loads ``libnvoptix.so.1`` lazily and its constructor can segfault instead
+    of raising when the system runtime is selected on this MIG host.  Loading
+    the two pinned libraries by absolute path before importing surfel_tracer
+    makes direct CLI use as safe as the shell runners and does not depend on
+    inherited shell state.
+    """
+
+    global _PINNED_OPTIX_LOADED
+    if _PINNED_OPTIX_LOADED:
+        return
+
+    repository_root = Path(__file__).resolve().parents[1]
+    configured = os.environ.get("OPTIX_DRIVER_LIB")
+    driver_root = (
+        Path(configured).expanduser()
+        if configured
+        else repository_root
+        / "outputs"
+        / f"nvidia_driver_{_PINNED_OPTIX_DRIVER_VERSION}_optix"
+        / "extracted"
+    )
+    rtcore = driver_root / f"libnvidia-rtcore.so.{_PINNED_OPTIX_DRIVER_VERSION}"
+    optix = driver_root / "libnvoptix.so.1"
+
+    if not rtcore.is_file() and not optix.is_file() and configured is None:
+        # Portable installs may intentionally use their host OptiX runtime.
+        return
+    missing = [str(path) for path in (rtcore, optix) if not path.is_file()]
+    if missing:
+        raise RuntimeError("incomplete pinned OptiX runtime; missing: " + ", ".join(missing))
+
+    try:
+        ctypes.CDLL(str(rtcore), mode=ctypes.RTLD_GLOBAL)
+        ctypes.CDLL(str(optix), mode=ctypes.RTLD_GLOBAL)
+    except OSError as exc:
+        raise RuntimeError(f"failed to preload pinned OptiX runtime from {driver_root}") from exc
+    _PINNED_OPTIX_LOADED = True
 
 
 class IRGSVisibilityTracer:
@@ -76,6 +124,7 @@ class IRGSVisibilityTracer:
     ) -> None:
         if scene.means.device.type != "cuda":
             raise RuntimeError("IRGS visibility tracing requires the Gaussian scene on CUDA")
+        _load_workspace_pinned_optix()
         try:
             from surfel_tracer import GaussianTracer
         except ImportError as exc:
