@@ -15,6 +15,7 @@ from aegir.provenance import (
     validate_native_view,
     validate_practical_geometry,
     validate_predicted_depth,
+    validate_sam3_ldr_view,
     verify_cache,
     write_json,
 )
@@ -54,6 +55,8 @@ def main():
                         "albedo_gt_file_path",
                         "roughness_gt_file_path",
                         "metallic_gt_file_path",
+                        "radiance_hdr_file_path",
+                        "radiance_exr_file_path",
                     )
                 )
                 for frame in meta["frames"]
@@ -63,9 +66,18 @@ def main():
         names = [
             "STEPS",
             "EMITTER_INITIALIZATION",
+            "ASSOCIATE_EMITTER_GAUSSIANS",
+            "EMITTER_GAUSSIAN_OFF_ALBEDO",
             "EMITTER_PERSISTENCE_RADIUS_FRACTION",
             "EMITTER_REPRESENTATION",
             "GEOMETRY_LR",
+            "OPTIMIZE_SCENE_MEANS",
+            "OPTIMIZE_SCENE_SCALES",
+            "OPTIMIZE_SCENE_ROTATIONS",
+            "OPTIMIZE_SCENE_OPACITIES",
+            "CONSTRAIN_SCENE_SCALES",
+            "SCENE_SCALE_MIN_RATIO",
+            "SCENE_SCALE_MAX_RATIO",
             "SCENE_CULLING",
             "BOUNCE_SAMPLES",
             "RASTER_SIZE",
@@ -88,9 +100,19 @@ def main():
             "EMITTER_ADAPTATION",
         ]
         initialization = os.getenv("EMITTER_INITIALIZATION", "hdr_multiview")
-        if initialization in {"hdr_multiview", "hdr_predicted_depth", "hdr_gbuffer"}:
-            validate_predicted_depth(args.data)
-            if initialization == "hdr_gbuffer":
+        if initialization == "sam3_multiview":
+            validate_sam3_ldr_view(args.data)
+        if initialization in {
+            "hdr_multiview",
+            "hdr_predicted_depth",
+            "hdr_gbuffer",
+            "sam3_mask_depth",
+            "sam3_multiview",
+        }:
+            if initialization not in {"hdr_multiview", "sam3_multiview"}:
+                validate_predicted_depth(args.data)
+            associate_emitters = os.getenv("ASSOCIATE_EMITTER_GAUSSIANS", "1") == "1"
+            if initialization == "hdr_gbuffer" or associate_emitters:
                 validate_emitter_inclusive_geometry(args.geometry)
             else:
                 validate_practical_geometry(args.geometry)
@@ -99,6 +121,7 @@ def main():
     for name in (
         "check_training_provenance.py",
         "run_2dgs_depth_pearson_10k.sh",
+        "run_2dgs_checkpoint_ablation_10k20k30k.sh",
         "run_conference_frozen_origin015_bounce8_train_inspect.sh",
     ):
         path = root / "scripts" / name

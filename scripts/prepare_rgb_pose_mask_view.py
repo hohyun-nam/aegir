@@ -17,7 +17,7 @@ from aegir.provenance import (
     publish_artifact,
     sha256_file,
     validate_depth_directory,
-    validate_model_depth_seed,
+    validate_practical_seed,
     verify_cache,
     write_json,
 )
@@ -32,6 +32,10 @@ TOP_LEVEL_SUPERVISION_KEYS = {
     "normal_space",
     "source_depth_mode",
     "source_normal_space",
+    "emitters",
+    "emitter_definitions",
+    "emitters_file_path",
+    "lighting_gt",
 }
 
 FRAME_SUPERVISION_KEYS = {
@@ -43,6 +47,7 @@ FRAME_SUPERVISION_KEYS = {
     "metallic_gt_file_path",
     "object_id_file_path",
     "radiance_hdr_file_path",
+    "radiance_exr_file_path",
     "roughness_gt_file_path",
     "emitter_mask_path",
 }
@@ -153,8 +158,10 @@ def main() -> None:
     seed_provenance = None
     if depth_manifest is not None:
         if point_cloud_source is None:
-            raise ValueError("Certified model-depth pipeline requires its predicted-depth PLY seed")
-        seed_provenance = validate_model_depth_seed(point_cloud_source)
+            raise ValueError(
+                "Certified practical pipeline requires an explicit provenance-checked PLY seed"
+            )
+        seed_provenance = validate_practical_seed(point_cloud_source)
     request = artifact_request("native_2dgs_view", {
         "generator_sha256": sha256_file(Path(__file__)),
         "dilation": args.emitter_mask_dilation, "exclude_emitters": args.exclude_emitter_masks,
