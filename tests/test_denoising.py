@@ -1,6 +1,29 @@
 import torch
 
-from aegir.denoising import cross_bilateral_denoise
+from aegir.denoising import cross_bilateral_denoise, edge_aware_vector_median_denoise
+
+
+def test_vector_median_removes_isolated_hdr_firefly():
+    color = torch.ones((5, 5, 3))
+    color[2, 2] = torch.tensor([100.0, 50.0, 10.0])
+    depth = torch.ones((5, 5))
+    normals = torch.zeros((5, 5, 3))
+    normals[..., 2] = 1.0
+    filtered = edge_aware_vector_median_denoise(color, depth, normals)
+    assert torch.equal(filtered[2, 2], torch.ones(3))
+
+
+def test_vector_median_respects_depth_and_normal_edge():
+    color = torch.zeros((5, 5, 3))
+    color[:, 3:] = 10.0
+    depth = torch.ones((5, 5))
+    depth[:, 3:] = 4.0
+    normals = torch.zeros((5, 5, 3))
+    normals[..., 2] = 1.0
+    normals[:, 3:, 2] = -1.0
+    filtered = edge_aware_vector_median_denoise(color, depth, normals)
+    assert torch.equal(filtered[:, :3], color[:, :3])
+    assert torch.equal(filtered[:, 3:], color[:, 3:])
 
 
 def _flat_geometry(height: int, width: int) -> tuple[torch.Tensor, torch.Tensor]:

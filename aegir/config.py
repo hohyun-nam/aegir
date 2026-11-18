@@ -6,7 +6,7 @@ from typing import Any
 
 @dataclass(slots=True)
 class RasterConfig:
-    image_size: int = 128
+    image_size: int | tuple[int, int] = 128
     alpha_threshold: float = 1.0e-3
     opacity_threshold: float = 1.0e-4
     rasterize_mode: str = "classic"
@@ -15,8 +15,19 @@ class RasterConfig:
 
 @dataclass(slots=True)
 class RenderConfig:
+    # Opt-in approximation: emitter-only direct lighting plus learned global
+    # diffuse irradiance. Legacy checkpoints retain explicit transport.
+    lighting_mode: str = "explicit_transport"
+    indirect_irradiance_init: float = 0.03
     num_brdf_samples: int = 128
     num_light_samples: int = 128
+    light_sample_pattern: str = "iid"  # opt-in randomized Hammersley placement: rqmc
+    # Preserve historical surface/surrogate-PDF rendering for existing models.
+    # solid_angle uses the visible ellipsoid cone and an exact directional PDF.
+    light_sampling_strategy: str = "surface"
+    # Optional per-point HDR-luminance trimmed mean; default remains all rays.
+    direct_sample_reduction: str = "mean"
+    direct_sample_keep_fraction: float = .8  # used by generic trimmed reduction
     eps: float = 1.0e-6
     # Normalized-coordinate values. At runtime bias is multiplied by the scene
     # bounds diagonal and steepness is divided by it.
@@ -33,6 +44,9 @@ class RenderConfig:
     # Composite learned emitter self-emission when analytic support is hit
     # before the camera-visible Gaussian surface.
     camera_visible_emitters: bool = True
+    # Keep tagged fixtures in camera rasterization, but omit active fixtures
+    # from the transport BVH. Camera emission follows their visible splats.
+    tagged_surface_emission: bool = False
     # Blend learned local +X/-X/+Y/-Y/+Z/-Z gains into the emitter's
     # full-sphere directional radiance. Disable only for the symmetric ablation.
     six_axis_emission: bool = True
@@ -51,6 +65,8 @@ class RenderConfig:
 
 @dataclass(slots=True)
 class LossWeights:
+    indirect_energy: float = 0.1
+    indirect_directional: float = 0.1
     focus_lambda: float = 5.0
     dssim_lambda: float = 0.2
     prior_albedo: float = 1.0
@@ -86,17 +102,22 @@ class ColorConfig:
 
 @dataclass(slots=True)
 class TrainingConfig:
-    # Current fixed-geometry experiments saturate by 5K. Longer schedules are
-    # explicit ablations rather than the default while that issue is studied.
+    indirect_lr: float = 1.0e-3
+    indirect_start_step: int = 100
+    # None preserves the constant SH LR used by existing checkpoints. When
+    # set, SH follows the freeze_start/end linear-decay interval.
+    indirect_final_lr: float | None = None
+    # Production policy: keep imported 2DGS geometry fixed and fit BRDF/light
+    # parameters for 5K. Longer or trainable-geometry runs are explicit
+    # ablations only.
     steps: int = 5_000
-    geometry_lr: float = 1.0e-5
-    # Geometry tensors share one optimizer, but ablations may isolate which
-    # 2DGS property receives gradients.  All remain enabled by default to
-    # preserve the historical trainable-geometry behavior.
-    optimize_scene_means: bool = True
-    optimize_scene_scales: bool = True
-    optimize_scene_rotations: bool = True
-    optimize_scene_opacities: bool = True
+    geometry_lr: float = 0.0
+    # Geometry tensors share one optimizer. Explicit ablations may selectively
+    # enable them, but the default keeps the verified 2DGS map unchanged.
+    optimize_scene_means: bool = False
+    optimize_scene_scales: bool = False
+    optimize_scene_rotations: bool = False
+    optimize_scene_opacities: bool = False
     # Optional initialization-relative guard for scale-only refinement.  It is
     # disabled by default and therefore does not alter existing experiments.
     constrain_scene_scales: bool = False
@@ -169,6 +190,11 @@ class TrainingConfig:
     associate_emitter_gaussians: bool = True
     emitter_gaussian_tangent_margin: float = 1.05
     emitter_gaussian_normal_fraction: float = 0.001
+    # Tagged fixture surfels are hidden while their analytic emitter is on,
+    # then re-enter the BRDF scene when that emitter is switched off.  Their
+    # source 2DGS SH contains the captured lamp glow, so seed a deliberately
+    # non-emissive gray material for the off state instead.
+    emitter_gaussian_off_albedo: float = 0.5
     grad_clip: float = 1.0
     checkpoint_every: int = 1_000
 

@@ -17,10 +17,10 @@ INSPECT_BOUNCE_SAMPLES="${INSPECT_BOUNCE_SAMPLES:-$BOUNCE_SAMPLES}"
 BOUNCE_CHUNK_SIZE="${BOUNCE_CHUNK_SIZE:-65536}"
 RASTER_SIZE="${RASTER_SIZE:-256}"
 GEOMETRY_LR="${GEOMETRY_LR:-0.0}"
-OPTIMIZE_SCENE_MEANS="${OPTIMIZE_SCENE_MEANS:-1}"
-OPTIMIZE_SCENE_SCALES="${OPTIMIZE_SCENE_SCALES:-1}"
-OPTIMIZE_SCENE_ROTATIONS="${OPTIMIZE_SCENE_ROTATIONS:-1}"
-OPTIMIZE_SCENE_OPACITIES="${OPTIMIZE_SCENE_OPACITIES:-1}"
+OPTIMIZE_SCENE_MEANS="${OPTIMIZE_SCENE_MEANS:-0}"
+OPTIMIZE_SCENE_SCALES="${OPTIMIZE_SCENE_SCALES:-0}"
+OPTIMIZE_SCENE_ROTATIONS="${OPTIMIZE_SCENE_ROTATIONS:-0}"
+OPTIMIZE_SCENE_OPACITIES="${OPTIMIZE_SCENE_OPACITIES:-0}"
 CONSTRAIN_SCENE_SCALES="${CONSTRAIN_SCENE_SCALES:-0}"
 SCENE_SCALE_MIN_RATIO="${SCENE_SCALE_MIN_RATIO:-0.9}"
 SCENE_SCALE_MAX_RATIO="${SCENE_SCALE_MAX_RATIO:-1.1}"
@@ -28,6 +28,11 @@ SCENE_CULLING="${SCENE_CULLING:-0}"
 ALBEDO_INITIALIZATION="${ALBEDO_INITIALIZATION:-sh_dc}"
 NEUTRAL_ALBEDO="${NEUTRAL_ALBEDO:-0.5}"
 ALBEDO_LR="${ALBEDO_LR:-0.003}"
+MATERIAL_LR="${MATERIAL_LR:-0.001}"
+EMITTER_LR="${EMITTER_LR:-0.001}"
+EMITTER_FINAL_LR="${EMITTER_FINAL_LR:-0.0001}"
+FREEZE_START="${FREEZE_START:-5000}"
+FREEZE_END="${FREEZE_END:-15000}"
 SH_FADE_START="${SH_FADE_START:-5000}"
 SH_FADE_END="${SH_FADE_END:-10000}"
 TRAINING_TRANSPORT_MODE="${TRAINING_TRANSPORT_MODE:-hybrid}"
@@ -46,8 +51,12 @@ EMITTER_REPRESENTATION="${EMITTER_REPRESENTATION:-planar_ellipse_2d}"
 EMITTER_INITIALIZATION="${EMITTER_INITIALIZATION:-hdr_multiview}"
 EMITTER_PERSISTENCE_RADIUS_FRACTION="${EMITTER_PERSISTENCE_RADIUS_FRACTION:-0.01}"
 MERGE_COLLINEAR_EMITTER_FRAGMENTS="${MERGE_COLLINEAR_EMITTER_FRAGMENTS:-1}"
+ASSOCIATE_EMITTER_GAUSSIANS="${ASSOCIATE_EMITTER_GAUSSIANS:-1}"
+EMITTER_GAUSSIAN_OFF_ALBEDO="${EMITTER_GAUSSIAN_OFF_ALBEDO:-0.5}"
 STEPS="${STEPS:-5000}"
+CHECKPOINT_EVERY="${CHECKPOINT_EVERY:-5000}"
 INITIALIZE_ONLY="${INITIALIZE_ONLY:-0}"
+RUN_POST_TRAIN_INSPECT="${RUN_POST_TRAIN_INSPECT:-1}"
 if (( STEPS % 1000 == 0 )); then
   STEP_LABEL="$((STEPS / 1000))k"
 else
@@ -72,24 +81,33 @@ for required in "$PYTHON" "$GEOMETRY" "$DATA/transforms.json" "$PRIORS/manifest.
   fi
 done
 
-CUDA_ROOT="$DNS_ENV/lib/python3.10/site-packages/nvidia/cu13"
+PYTHON_SITE=$(
+  "$PYTHON" -c 'import site; print(site.getsitepackages()[0])'
+)
+CUDA_ROOT="${CUDA_ROOT:-$PYTHON_SITE/nvidia/cu13}"
 CUDA_STUBS="$AEGIR_ROOT/outputs/cuda_link_stubs"
-OPTIX_DRIVER_LIB="${OPTIX_DRIVER_LIB:-$AEGIR_ROOT/outputs/nvidia_driver_580.173.02_optix/extracted}"
-for required in \
-  "$OPTIX_DRIVER_LIB/libnvoptix.so.1" \
-  "$OPTIX_DRIVER_LIB/libnvidia-rtcore.so.580.173.02"; do
-  if [[ ! -s "$required" ]]; then
-    echo "missing usable NVIDIA OptiX driver library: $required" >&2
-    exit 1
-  fi
-done
+bundled_optix="$AEGIR_ROOT/outputs/nvidia_driver_580.173.02_optix/extracted"
+# The validated 580.173.02 runtime is required on this server's MIG GPU.
+export OPTIX_DRIVER_LIB="${OPTIX_DRIVER_LIB:-$bundled_optix}"
+if [[ ! -s "$OPTIX_DRIVER_LIB/libnvoptix.so.1" ]]; then
+  echo "missing usable NVIDIA OptiX driver library: $OPTIX_DRIVER_LIB/libnvoptix.so.1" >&2
+  exit 1
+fi
+OPTIX_RTCORE=$(
+  find -L "$OPTIX_DRIVER_LIB" -maxdepth 1 -type f -name 'libnvidia-rtcore.so.*' -print \
+    | sort -V | tail -n 1
+)
+if [[ -z "$OPTIX_RTCORE" || ! -s "$OPTIX_RTCORE" ]]; then
+  echo "missing usable NVIDIA OptiX rtcore library in: $OPTIX_DRIVER_LIB" >&2
+  exit 1
+fi
 # Keep NVIDIA OpenGL/Mesa libraries out of the Python/OpenCV search path.
 OPTIX_RUNTIME_LIB="$AEGIR_ROOT/outputs/optix_runtime_only"
 mkdir -p "$OPTIX_RUNTIME_LIB"
 ln -sfn "$OPTIX_DRIVER_LIB/libnvoptix.so.1" "$OPTIX_RUNTIME_LIB/libnvoptix.so.1"
-ln -sfn "$OPTIX_DRIVER_LIB/libnvidia-rtcore.so.580.173.02" "$OPTIX_RUNTIME_LIB/libnvidia-rtcore.so.580.173.02"
+ln -sfn "$OPTIX_RTCORE" "$OPTIX_RUNTIME_LIB/$(basename "$OPTIX_RTCORE")"
 export CUDA_HOME="$CUDA_ROOT"
-export TORCH_CUDA_ARCH_LIST=12.0
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-12.0}"
 export TORCH_EXTENSIONS_DIR="$AEGIR_ROOT/outputs/torch_extensions_cache_workspace"
 export PATH="$DNS_ENV/bin:$CUDA_ROOT/bin:$PATH"
 export LIBRARY_PATH="$CUDA_STUBS:$CUDA_ROOT/lib:$CUDA_ROOT/lib64${LIBRARY_PATH:+:$LIBRARY_PATH}"
@@ -111,27 +129,32 @@ if [[ "$EMITTER_REPRESENTATION" != "planar_ellipse_2d" && "$EMITTER_REPRESENTATI
   echo "EMITTER_REPRESENTATION must be planar_ellipse_2d or ellipsoid_3d" >&2
   exit 1
 fi
-for flag in OPTIMIZE_SCENE_MEANS OPTIMIZE_SCENE_SCALES OPTIMIZE_SCENE_ROTATIONS OPTIMIZE_SCENE_OPACITIES CONSTRAIN_SCENE_SCALES OPTIMIZE_EMITTER_CENTERS OPTIMIZE_EMITTER_ROTATIONS OPTIMIZE_EMITTER_SCALES CONSTRAIN_EMITTER_SCALES EMITTER_ADAPTATION MERGE_COLLINEAR_EMITTER_FRAGMENTS INITIALIZE_ONLY; do
+for flag in OPTIMIZE_SCENE_MEANS OPTIMIZE_SCENE_SCALES OPTIMIZE_SCENE_ROTATIONS OPTIMIZE_SCENE_OPACITIES CONSTRAIN_SCENE_SCALES OPTIMIZE_EMITTER_CENTERS OPTIMIZE_EMITTER_ROTATIONS OPTIMIZE_EMITTER_SCALES CONSTRAIN_EMITTER_SCALES EMITTER_ADAPTATION MERGE_COLLINEAR_EMITTER_FRAGMENTS ASSOCIATE_EMITTER_GAUSSIANS INITIALIZE_ONLY RUN_POST_TRAIN_INSPECT; do
   if [[ "${!flag}" != "0" && "${!flag}" != "1" ]]; then
     echo "$flag must be 0 or 1" >&2
     exit 1
   fi
 done
-if (( RASTER_SIZE <= 0 || STEPS <= 0 )); then
-  echo "RASTER_SIZE and STEPS must be positive" >&2
+if (( RASTER_SIZE <= 0 || STEPS <= 0 || CHECKPOINT_EVERY <= 0 )); then
+  echo "RASTER_SIZE, STEPS, and CHECKPOINT_EVERY must be positive" >&2
   exit 1
 fi
 if (( BOUNCE_SAMPLES <= 0 || INSPECT_BOUNCE_SAMPLES <= 0 || BOUNCE_CHUNK_SIZE <= 0 )); then
   echo "BOUNCE_SAMPLES, INSPECT_BOUNCE_SAMPLES, and BOUNCE_CHUNK_SIZE must be positive" >&2
   exit 1
 fi
+if (( FREEZE_START < 0 || FREEZE_END <= FREEZE_START )); then
+  echo "require 0 <= FREEZE_START < FREEZE_END" >&2
+  exit 1
+fi
 
-export GEOMETRY DATA PRIORS CHECKPOINT BOUNCE_SAMPLES BOUNCE_CHUNK_SIZE RASTER_SIZE STEPS INITIALIZE_ONLY
+export GEOMETRY DATA PRIORS CHECKPOINT BOUNCE_SAMPLES BOUNCE_CHUNK_SIZE RASTER_SIZE STEPS CHECKPOINT_EVERY INITIALIZE_ONLY
 export GEOMETRY_LR SCENE_CULLING
 export OPTIMIZE_SCENE_MEANS OPTIMIZE_SCENE_SCALES OPTIMIZE_SCENE_ROTATIONS
 export OPTIMIZE_SCENE_OPACITIES CONSTRAIN_SCENE_SCALES
 export SCENE_SCALE_MIN_RATIO SCENE_SCALE_MAX_RATIO
-export ALBEDO_INITIALIZATION NEUTRAL_ALBEDO ALBEDO_LR
+export ALBEDO_INITIALIZATION NEUTRAL_ALBEDO ALBEDO_LR MATERIAL_LR
+export EMITTER_LR EMITTER_FINAL_LR FREEZE_START FREEZE_END
 export SH_FADE_START SH_FADE_END
 export TRAINING_TRANSPORT_MODE
 export LIGHT_WHITE LIGHT_WHITE_RAMP_END
@@ -141,6 +164,7 @@ export CONSTRAIN_EMITTER_SCALES EMITTER_SCALE_MIN_RATIO EMITTER_SCALE_MAX_RATIO
 export EMITTER_ADAPTATION
 export EMITTER_REPRESENTATION EMITTER_INITIALIZATION EMITTER_PERSISTENCE_RADIUS_FRACTION
 export MERGE_COLLINEAR_EMITTER_FRAGMENTS
+export ASSOCIATE_EMITTER_GAUSSIANS EMITTER_GAUSSIAN_OFF_ALBEDO
 
 mkdir -p "$OUTPUT_ROOT" "$CUDA_STUBS" "$TORCH_EXTENSIONS_DIR"
 exec > >(tee -a "$LOG") 2>&1
@@ -151,8 +175,8 @@ echo "geometry: $GEOMETRY"
 echo "checkpoint: $CHECKPOINT"
 echo "geometry_lr=$GEOMETRY_LR scene_culling=$SCENE_CULLING raster_size=$RASTER_SIZE origin_offset=0.15 bounce_samples=$BOUNCE_SAMPLES bounce_chunk_size=$BOUNCE_CHUNK_SIZE albedo_initialization=$ALBEDO_INITIALIZATION neutral_albedo=$NEUTRAL_ALBEDO albedo_lr=$ALBEDO_LR six_axis_emission=$SIX_AXIS_EMISSION axis_lobe_sharpness=$EMITTER_AXIS_LOBE_SHARPNESS"
 echo "scene_geometry means=$OPTIMIZE_SCENE_MEANS scales=$OPTIMIZE_SCENE_SCALES rotations=$OPTIMIZE_SCENE_ROTATIONS opacities=$OPTIMIZE_SCENE_OPACITIES scale_constraint=$CONSTRAIN_SCENE_SCALES scale_ratio=[$SCENE_SCALE_MIN_RATIO,$SCENE_SCALE_MAX_RATIO]"
-echo "emitter_representation=$EMITTER_REPRESENTATION emitter_initialization=$EMITTER_INITIALIZATION merge_collinear_fragments=$MERGE_COLLINEAR_EMITTER_FRAGMENTS emitter_centers_trainable=$OPTIMIZE_EMITTER_CENTERS emitter_rotations_trainable=$OPTIMIZE_EMITTER_ROTATIONS emitter_scales_trainable=$OPTIMIZE_EMITTER_SCALES emitter_scale_constraint=$CONSTRAIN_EMITTER_SCALES scale_ratio=[$EMITTER_SCALE_MIN_RATIO,$EMITTER_SCALE_MAX_RATIO] emitter_adaptation=$EMITTER_ADAPTATION"
-echo "training_steps=$STEPS training_transport_mode=$TRAINING_TRANSPORT_MODE sh_fade=[$SH_FADE_START,$SH_FADE_END] material_freeze=15000 light_white_target=$LIGHT_WHITE light_white_ramp_end=$LIGHT_WHITE_RAMP_END"
+echo "emitter_representation=$EMITTER_REPRESENTATION emitter_initialization=$EMITTER_INITIALIZATION merge_collinear_fragments=$MERGE_COLLINEAR_EMITTER_FRAGMENTS associate_emitter_gaussians=$ASSOCIATE_EMITTER_GAUSSIANS emitter_off_albedo=$EMITTER_GAUSSIAN_OFF_ALBEDO emitter_centers_trainable=$OPTIMIZE_EMITTER_CENTERS emitter_rotations_trainable=$OPTIMIZE_EMITTER_ROTATIONS emitter_scales_trainable=$OPTIMIZE_EMITTER_SCALES emitter_scale_constraint=$CONSTRAIN_EMITTER_SCALES scale_ratio=[$EMITTER_SCALE_MIN_RATIO,$EMITTER_SCALE_MAX_RATIO] emitter_adaptation=$EMITTER_ADAPTATION"
+echo "training_steps=$STEPS training_transport_mode=$TRAINING_TRANSPORT_MODE sh_fade=[$SH_FADE_START,$SH_FADE_END] lr_decay=[$FREEZE_START,$FREEZE_END] albedo_lr=$ALBEDO_LR material_lr=$MATERIAL_LR emitter_lr=[$EMITTER_LR,$EMITTER_FINAL_LR] light_white_target=$LIGHT_WHITE light_white_ramp_end=$LIGHT_WHITE_RAMP_END"
 
 initialization_checkpoint="$OUTPUT_ROOT/aegir_initialization.pt"
 verified=$("$PYTHON" scripts/check_training_provenance.py --stage aegir --action begin --data "$DATA" --geometry "$GEOMETRY" --priors "$PRIORS" --output "$CHECKPOINT")
@@ -193,7 +217,7 @@ from aegir.trainer import train_shared_gaussians
 
 config = AEGIRConfig()
 config.training.steps = int(os.environ["STEPS"])
-config.training.checkpoint_every = 5_000
+config.training.checkpoint_every = int(os.environ["CHECKPOINT_EVERY"])
 config.training.geometry_lr = float(os.environ["GEOMETRY_LR"])
 config.training.optimize_scene_means = os.environ["OPTIMIZE_SCENE_MEANS"] == "1"
 config.training.optimize_scene_scales = os.environ["OPTIMIZE_SCENE_SCALES"] == "1"
@@ -203,23 +227,25 @@ config.training.constrain_scene_scales = os.environ["CONSTRAIN_SCENE_SCALES"] ==
 config.training.scene_scale_min_ratio = float(os.environ["SCENE_SCALE_MIN_RATIO"])
 config.training.scene_scale_max_ratio = float(os.environ["SCENE_SCALE_MAX_RATIO"])
 config.training.albedo_lr = float(os.environ["ALBEDO_LR"])
-config.training.material_lr = 1.0e-3
+config.training.material_lr = float(os.environ["MATERIAL_LR"])
 config.training.albedo_initialization = os.environ["ALBEDO_INITIALIZATION"]
 config.training.neutral_albedo = float(os.environ["NEUTRAL_ALBEDO"])
-config.training.emitter_lr = 1.0e-3
-config.training.emitter_final_lr = 1.0e-4
+config.training.emitter_lr = float(os.environ["EMITTER_LR"])
+config.training.emitter_final_lr = float(os.environ["EMITTER_FINAL_LR"])
 config.training.emitter_representation = os.environ["EMITTER_REPRESENTATION"]
 config.training.emitter_initialization = os.environ["EMITTER_INITIALIZATION"]
 config.training.emitter_persistence_radius_fraction = float(os.environ["EMITTER_PERSISTENCE_RADIUS_FRACTION"])
 config.training.merge_collinear_emitter_fragments = os.environ["MERGE_COLLINEAR_EMITTER_FRAGMENTS"] == "1"
+config.training.associate_emitter_gaussians = os.environ["ASSOCIATE_EMITTER_GAUSSIANS"] == "1"
+config.training.emitter_gaussian_off_albedo = float(os.environ["EMITTER_GAUSSIAN_OFF_ALBEDO"])
 config.training.optimize_emitter_centers = os.environ["OPTIMIZE_EMITTER_CENTERS"] == "1"
 config.training.optimize_emitter_rotations = os.environ["OPTIMIZE_EMITTER_ROTATIONS"] == "1"
 config.training.optimize_emitter_scales = os.environ["OPTIMIZE_EMITTER_SCALES"] == "1"
 config.training.constrain_emitter_scales = os.environ["CONSTRAIN_EMITTER_SCALES"] == "1"
 config.training.emitter_scale_min_ratio = float(os.environ["EMITTER_SCALE_MIN_RATIO"])
 config.training.emitter_scale_max_ratio = float(os.environ["EMITTER_SCALE_MAX_RATIO"])
-config.training.freeze_start = 5_000
-config.training.freeze_end = 15_000
+config.training.freeze_start = int(os.environ["FREEZE_START"])
+config.training.freeze_end = int(os.environ["FREEZE_END"])
 config.training.sh_fade_start = int(os.environ["SH_FADE_START"])
 config.training.sh_fade_end = int(os.environ["SH_FADE_END"])
 config.training.training_transport_mode = os.environ["TRAINING_TRANSPORT_MODE"]
@@ -292,6 +318,12 @@ fi
 
 if [[ "$INITIALIZE_ONLY" == "1" ]]; then
   echo "Initialization is already covered by completed checkpoint: $CHECKPOINT"
+  exit 0
+fi
+
+if [[ "$RUN_POST_TRAIN_INSPECT" == "0" ]]; then
+  echo "Training complete; post-training inspection disabled"
+  echo "checkpoint: $CHECKPOINT"
   exit 0
 fi
 

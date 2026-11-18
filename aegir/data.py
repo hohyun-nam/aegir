@@ -93,6 +93,14 @@ def resize_mask(value: Tensor, size: tuple[int, int]) -> Tensor:
     return result[0].permute(1, 2, 0).bool().contiguous()
 
 
+def image_dimensions(image_size: int | tuple[int, int] | list[int]) -> tuple[int, int]:
+    """Return (height, width); integer sizes retain the square legacy contract."""
+    values = (image_size, image_size) if isinstance(image_size, int) else tuple(image_size)
+    if len(values) != 2 or any(not isinstance(v, int) or isinstance(v, bool) or v <= 0 for v in values):
+        raise ValueError('image_size must be a positive integer or (height, width)')
+    return values
+
+
 def _normalized_relative_path(value: str | Path) -> str:
     normalized = Path(str(value).replace("\\", "/")).as_posix()
     while normalized.startswith("./"):
@@ -201,7 +209,7 @@ class MultiViewSceneDataset:
         nerfstudio_dir: str | Path,
         dnsplatter_checkpoint: str | Path,
         prior_dir: str | Path | None = None,
-        image_size: int = 128,
+        image_size: int | tuple[int, int] = 128,
         max_views: int | None = None,
         split: str = "train",
         allow_gt_emitter_initialization: bool = False,
@@ -209,7 +217,8 @@ class MultiViewSceneDataset:
         self.root = Path(nerfstudio_dir).resolve()
         self.checkpoint = Path(dnsplatter_checkpoint).resolve()
         self.prior_dir = Path(prior_dir).resolve() if prior_dir is not None else None
-        self.image_size = int(image_size)
+        self.image_height, self.image_width = image_dimensions(image_size)
+        self.image_size = image_size if isinstance(image_size, int) else (self.image_height, self.image_width)
         self.max_views = max_views
         self.split = split
         metadata = json.loads((self.root / "transforms.json").read_text(encoding="utf-8"))
@@ -247,6 +256,8 @@ class MultiViewSceneDataset:
         rotation, translation = matrix[:, :3], matrix[:, 3]
         definitions = []
         for emitter in payload.get("emitters", []):
+            if emitter.get("condition", {}).get("enabled") is False:
+                continue
             corners = emitter.get("world_bbox_corners")
             if corners is None:
                 continue
@@ -267,13 +278,13 @@ class MultiViewSceneDataset:
         image = Image.open(self.root / frame["file_path"]).convert("RGB")
         source_w, source_h = image.size
         target = torch.from_numpy(np.asarray(image).copy()).float().div(255.0)
-        target = resize_map(target, (self.image_size, self.image_size))
-        sx = self.image_size / float(source_w)
-        sy = self.image_size / float(source_h)
+        target = resize_map(target, (self.image_height, self.image_width))
+        sx = self.image_width / float(source_w)
+        sy = self.image_height / float(source_h)
         mask_path = frame.get("mask_path")
         if mask_path is None:
             mask = torch.ones(
-                (self.image_size, self.image_size, 1),
+                (self.image_height, self.image_width, 1),
                 dtype=torch.bool,
             )
         else:
@@ -284,7 +295,7 @@ class MultiViewSceneDataset:
                     f"expected {(source_w, source_h)}"
                 )
             mask = torch.from_numpy(np.asarray(mask_image).copy()) > 0
-            mask = resize_mask(mask, (self.image_size, self.image_size))
+            mask = resize_mask(mask, (self.image_height, self.image_width))
         fx = float(frame.get("fl_x", metadata.get("fl_x")))
         fy = float(frame.get("fl_y", metadata.get("fl_y", fx)))
         cx = float(frame.get("cx", metadata.get("cx", source_w * 0.5)))
@@ -295,8 +306,8 @@ class MultiViewSceneDataset:
             "fy": fy * sy,
             "cx": cx * sx,
             "cy": cy * sy,
-            "width": self.image_size,
-            "height": self.image_size,
+            "width": self.image_width,
+            "height": self.image_height,
             "camera_convention": "opengl",
         }
         camera = transform_camera(camera, saved_to_model)
@@ -312,7 +323,7 @@ class MultiViewSceneDataset:
                 )
             emitter_mask = resize_mask(
                 torch.from_numpy(np.asarray(source).copy()) > 0,
-                (self.image_size, self.image_size),
+                (self.image_height, self.image_width),
             )
         metric_depth = None
         depth_path = frame.get("depth_file_path")
@@ -330,7 +341,7 @@ class MultiViewSceneDataset:
                 )
             metric_depth = resize_map(
                 torch.from_numpy(depth.copy()).unsqueeze(-1),
-                (self.image_size, self.image_size),
+                (self.image_height, self.image_width),
             )[..., 0]
             metric_depth = metric_depth * float(saved_to_model[1])
         radiance_hdr = None
@@ -352,7 +363,14 @@ class MultiViewSceneDataset:
                     if name == "albedo":
                         value = decode_prior_albedo(value, payload)
                     priors[name] = resize_map(value, target.shape[:2])
-            if "radiance_hdr" in payload:
+            # Material-prior caches may contain an HDR copy even when the
+            # dataset explicitly declares an LDR experiment.  Keep that copy
+            # out of LDR frames so it cannot silently leak into initialization
+            # or training.
+            if (
+                "radiance_hdr" in payload
+                and self.observation_policy["domain"] == "linear_hdr"
+            ):
                 radiance_hdr = resize_map(payload["radiance_hdr"].float(), target.shape[:2])
         if "radiance_hdr_file_path" in frame:
             hdr = np.load(self.root / frame["radiance_hdr_file_path"]).astype(np.float32)

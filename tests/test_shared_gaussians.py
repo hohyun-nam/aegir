@@ -46,7 +46,7 @@ from aegir.trainer import (
     training_sh_proxy_weight,
 )
 from scripts.export_dnsplatter_checkpoint_supersplat import load_checkpoint_gaussians
-from scripts.export_scene_supersplat import scene_from_checkpoint
+from scripts.export_scene_supersplat import emitter_gaussians, scene_from_checkpoint
 
 
 def make_export(path: Path, count: int = 4) -> None:
@@ -95,6 +95,37 @@ def test_supersplat_export_omits_tagged_emitter_rows(tmp_path: Path) -> None:
     assert exported["means"].shape[0] == 2
     assert all(value.shape[0] == 2 for value in exported.values())
     assert torch.equal(exported["means"], scene.means[[0, 2]])
+
+
+def test_supersplat_tag_visualization_keeps_rows_and_colors_only_tags_green(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "gaussians.pt"
+    make_export(checkpoint)
+    scene = GaussianMaterialBackend(checkpoint)
+    scene.emitter_ids[:] = torch.tensor([-1, 0, -1, 1])
+
+    exported = scene_from_checkpoint(
+        {"scene_state": scene.state_dict()},
+        include_tagged_emitters=True,
+        tagged_emitter_green_dc=8.0,
+    )
+
+    assert exported["means"].shape[0] == 4
+    assert torch.equal(exported["f_dc"][[1, 3]], torch.tensor([[0.0, 8.0, 0.0]]).repeat(2, 1))
+    assert torch.count_nonzero(exported["f_dc"][[0, 2], 1] == 8.0) == 0
+
+
+def test_supersplat_emitter_export_converts_physical_radius_to_visual_sigma() -> None:
+    state = {
+        "centers": torch.zeros((1, 3)),
+        "scales": torch.tensor([[3.0, 1.5, 0.3]]),
+        "quaternions": torch.tensor([[1.0, 0.0, 0.0, 0.0]]),
+    }
+
+    exported = emitter_gaussians(state, rest_channels=15, green_dc=8.0)
+
+    assert torch.allclose(exported["scale"].exp(), torch.tensor([[1.0, 0.5, 0.1]]))
 
 
 def test_supersplat_export_loads_native_aegir_2dgs_geometry(tmp_path: Path) -> None:
@@ -148,6 +179,7 @@ def test_inclusive_gaussians_are_associated_with_analytic_emitters(tmp_path: Pat
         (torch.full((3,), -2.0), torch.full((3,), 2.0)),
         tangent_margin=1.0,
         normal_fraction=0.01,
+        off_albedo=0.35,
     )
 
     assert scene.emitter_ids.tolist() == [0, 0, -1, -1]
@@ -156,6 +188,8 @@ def test_inclusive_gaussians_are_associated_with_analytic_emitters(tmp_path: Pat
     assert scene.render_mask([]).tolist() == [True, True, True, True]
     assert diagnostic["counts"] == [2]
     assert diagnostic["tagged"] == 2
+    assert diagnostic["off_albedo"] == pytest.approx(0.35)
+    assert torch.allclose(scene.albedo[:2], torch.full((2, 3), 0.35))
 
 
 def test_scene_geometry_optimization_can_select_scale_only(tmp_path: Path) -> None:
@@ -188,6 +222,7 @@ def test_scene_scale_constraint_uses_initial_relative_bounds(tmp_path: Path) -> 
     scene = GaussianMaterialBackend(checkpoint)
     anchors = scene.scales.detach().clone()
     config = AEGIRConfig()
+    config.training.optimize_scene_scales = True
     config.training.constrain_scene_scales = True
     config.training.scene_scale_min_ratio = 0.9
     config.training.scene_scale_max_ratio = 1.1
@@ -339,6 +374,30 @@ def test_large_scene_gaussian_without_high_gradient_is_not_deleted(tmp_path: Pat
     assert torch.equal(scene.means, original)
 
 
+def test_scene_refinement_preserves_tagged_fixture_rows_for_lights_off(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "gaussians.pt"
+    make_export(checkpoint)
+    scene = GaussianMaterialBackend(checkpoint)
+    scene.opacity_logits.data.copy_(
+        torch.logit(torch.full((scene.gaussian_count, 1), 0.05))
+    )
+    scene.emitter_ids[0] = 0
+
+    result = refine_scene_gaussians(
+        scene,
+        completed_steps=3_100,
+        average_xy_gradient=torch.zeros(scene.gaussian_count),
+        max_2d_size=torch.zeros(scene.gaussian_count),
+        config=SceneCullingConfig(opacity_threshold=0.1),
+    )
+
+    assert result.pruned_below_opacity == 3
+    assert scene.gaussian_count == 1
+    assert scene.emitter_ids.tolist() == [0]
+
+
 def test_scene_culling_schedule_and_legacy_config() -> None:
     config = SceneCullingConfig()
     assert not should_refine_scene(500, config)
@@ -360,6 +419,7 @@ def test_planarization_moves_smallest_axis_to_surface_normal() -> None:
 
 def test_paper_curriculum() -> None:
     config = AEGIRConfig()
+    config.training.geometry_lr = 1.0e-5
     assert curriculum_lrs(config, 0) == (1.0e-5, 3.0e-3, 1.0e-3, 1.0e-3)
     assert curriculum_lrs(config, 5_000) == (1.0e-5, 3.0e-3, 1.0e-3, 1.0e-3)
     geometry, albedo, material, emitter = curriculum_lrs(config, 10_000)
@@ -369,6 +429,16 @@ def test_paper_curriculum() -> None:
     assert emitter == 5.5e-4
     assert curriculum_lrs(config, 15_000) == (0.0, 0.0, 0.0, 1.0e-4)
     assert curriculum_lrs(config, 19_999) == (0.0, 0.0, 0.0, 1.0e-4)
+
+
+def test_default_training_policy_is_frozen_geometry_for_5k() -> None:
+    training = AEGIRConfig().training
+    assert training.steps == 5_000
+    assert training.geometry_lr == 0.0
+    assert not training.optimize_scene_means
+    assert not training.optimize_scene_scales
+    assert not training.optimize_scene_rotations
+    assert not training.optimize_scene_opacities
 
 
 def test_white_light_weight_is_disabled_by_default_and_can_ramp() -> None:
@@ -1470,6 +1540,27 @@ def _camera_emission_gbuffer(surface_distance: float) -> dict[str, torch.Tensor]
         "camera_ray_dirs": torch.tensor([[0.0, 0.0, 1.0]]),
         "surface_distances": torch.tensor([[surface_distance]]),
     }
+
+
+def test_tagged_camera_emission_uses_visibility_weights_and_keeps_reflection(monkeypatch):
+    renderer = DeferredRenderer(RenderConfig(tagged_surface_emission=True))
+    emitters = AreaEmitterModel(torch.tensor([[0., 0., 10.]]), torch.ones((1, 2)))
+    gbuffer = _camera_emission_gbuffer(1.)
+    gbuffer['emitter_weights'] = torch.tensor([[.25]])
+    monkeypatch.setattr(renderer, '_brdf_samples',
+                        lambda *a, **k: (torch.ones((1, 3)), torch.zeros((1, 3)), 1))
+    monkeypatch.setattr(renderer, '_light_samples',
+                        lambda *a, **k: (torch.ones((1, 3)), torch.zeros((1, 3)), 1))
+    result = renderer.render(gbuffer, emitters, tonemap=False)
+    radiance = emitters.radiance_for_ids(gbuffer['view_dirs'], torch.zeros(1, dtype=torch.long))
+    assert torch.allclose(result['emission_hdr'], .25 * radiance)
+    assert torch.allclose(result['hdr'], 1 + .25 * radiance)
+    result['emission_hdr'].sum().backward()
+    assert emitters.log_colors.grad.abs().sum() > 0
+    gbuffer['emitter_weights'].zero_()
+    emission, mask = renderer.camera_visible_emission(gbuffer, emitters)
+    assert emission.count_nonzero() == 0
+    assert mask.count_nonzero() == 0
 
 
 def test_camera_visible_emitter_replaces_and_skips_surface_shading(monkeypatch) -> None:

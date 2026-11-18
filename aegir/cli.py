@@ -6,8 +6,9 @@ from pathlib import Path
 import torch
 
 from .config import AEGIRConfig
+from .indirect import DIRECT_SH_MODE, LIGHTING_MODES
 from .inspect import inspect_checkpoint, inspect_emitter_evolution, render_camera_path
-from .trainer import resume_shared_gaussians, train_shared_gaussians
+from .trainer import adapt_lighting, resume_shared_gaussians, train_shared_gaussians
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -15,7 +16,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     train = subparsers.add_parser(
         "train-gaussian-scene",
-        help="jointly optimize one shared 2DGS geometry, per-Gaussian BRDFs, and emitters",
+        help="fit per-Gaussian BRDFs and emitters; geometry optimization is opt-in",
     )
     train.add_argument("--dnsplatter-checkpoint", type=Path, required=True)
     train.add_argument("--nerfstudio-dir", type=Path, required=True)
@@ -31,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--resume",
         type=Path,
         default=None,
-        help="resume an exact-resume v14-v16 checkpoint; checkpoint config remains authoritative",
+        help="resume an exact-resume v14-v17 checkpoint; checkpoint config remains authoritative",
     )
     train.add_argument("--output", type=Path, required=True)
     train.add_argument("--device", default="cuda")
@@ -40,11 +41,27 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--max-views", type=int, default=None)
     train.add_argument("--max-gaussians", type=int, default=None)
     train.add_argument("--max-emitters", type=int, default=16)
-    train.add_argument("--geometry-lr", type=float, default=1.0e-5)
-    train.add_argument("--freeze-scene-means", action="store_true")
-    train.add_argument("--freeze-scene-scales", action="store_true")
-    train.add_argument("--freeze-scene-rotations", action="store_true")
-    train.add_argument("--freeze-scene-opacities", action="store_true")
+    train.add_argument("--geometry-lr", type=float, default=0.0)
+    for name in ("means", "scales", "rotations", "opacities"):
+        geometry = train.add_mutually_exclusive_group()
+        geometry.add_argument(
+            f"--freeze-scene-{name}",
+            dest=f"optimize_scene_{name}",
+            action="store_false",
+            help=f"keep background-Gaussian {name} fixed (default)",
+        )
+        geometry.add_argument(
+            f"--optimize-scene-{name}",
+            dest=f"optimize_scene_{name}",
+            action="store_true",
+            help=f"explicitly optimize background-Gaussian {name} (ablation)",
+        )
+    train.set_defaults(
+        optimize_scene_means=False,
+        optimize_scene_scales=False,
+        optimize_scene_rotations=False,
+        optimize_scene_opacities=False,
+    )
     train.add_argument(
         "--constrain-scene-scales",
         action="store_true",
@@ -128,7 +145,22 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="smoothly ramp white-light weight from zero until this step; 0 keeps it fixed",
     )
-    train.add_argument("--emitter-initialization", choices=("hdr_multiview", "hdr_predicted_depth", "hdr_gbuffer", "gt_mask_depth"), default="hdr_multiview", help="GT mask/depth initialization requires explicit diagnostic opt-in")
+    train.add_argument(
+        "--emitter-initialization",
+        choices=(
+            "hdr_multiview",
+            "hdr_predicted_depth",
+            "hdr_gbuffer",
+            "gt_mask_depth",
+            "sam3_mask_depth",
+            "sam3_multiview",
+        ),
+        default="hdr_multiview",
+        help=(
+            "sam3_multiview projects LDR SAM3 masks onto 2DGS surfaces, then voxel/DBSCAN clusters; "
+            "sam3_mask_depth uses predicted depth; GT mode is diagnostic only"
+        ),
+    )
     train.add_argument(
         "--no-merge-collinear-emitter-fragments",
         action="store_true",
@@ -141,9 +173,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train.add_argument("--emitter-gaussian-tangent-margin", type=float, default=1.05)
     train.add_argument("--emitter-gaussian-normal-fraction", type=float, default=0.001)
+    train.add_argument(
+        "--emitter-gaussian-off-albedo",
+        type=float,
+        default=0.5,
+        help="scene-linear gray albedo assigned to tagged fixture surfels for lights-off rendering",
+    )
     train.add_argument("--checkpoint-every", type=int, default=5_000)
     train.add_argument("--num-brdf-samples", type=int, default=128)
-    train.add_argument("--num-light-samples", type=int, default=128)
+    train.add_argument("--num-light-samples", type=int, default=None,
+                       help="default: 128 explicit transport, 32 learned indirect")
+    train.add_argument("--lighting-mode", choices=LIGHTING_MODES, default="explicit_transport")
+    train.add_argument("--indirect-irradiance-init", type=float, default=0.03)
+    train.add_argument("--indirect-lr", type=float, default=1.0e-3)
+    train.add_argument("--indirect-start-step", type=int, default=100)
+    train.add_argument("--indirect-final-lr", type=float, default=None,
+                       help="decay SH LR over --freeze-start/end; omitted preserves constant SH LR")
+    train.add_argument("--indirect-energy", type=float, default=0.1)
+    train.add_argument("--indirect-directional", type=float, default=0.1)
     train.add_argument(
         "--num-bounce-samples",
         type=int,
@@ -220,6 +267,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train.add_argument("--no-indirect", action="store_true")
 
+    adapt = subparsers.add_parser(
+        "adapt-lighting",
+        help="reuse a trained scene/BRDF and fit only non-geometric emitter parameters",
+    )
+    adapt.add_argument("--base-checkpoint", type=Path, required=True)
+    adapt.add_argument("--nerfstudio-dir", type=Path, required=True)
+    adapt.add_argument("--output", type=Path, required=True)
+    adapt.add_argument("--device", default="cuda")
+    adapt.add_argument("--steps", type=int, default=2_000)
+    adapt.add_argument("--checkpoint-every", type=int, default=500)
+    adapt.add_argument("--expected-emitters", type=int, default=None)
+    adapt.add_argument("--emitter-lr", type=float, default=1.0e-3)
+    adapt.add_argument("--max-views", type=int, default=None)
+    adapt.add_argument("--initialize-only", action="store_true")
+
     inspect = subparsers.add_parser(
         "inspect",
         help="re-rasterize the shared Gaussian scene in every requested camera",
@@ -235,7 +297,22 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("train", "val", "test", "all"),
         default="test",
     )
-    inspect.add_argument("--render-samples", type=int, default=128)
+    inspect.add_argument("--render-samples", type=int, default=None,
+                         help="inference default: 128 emitter samples (also 128 BRDF samples for explicit transport)")
+    inspect.add_argument("--light-sample-pattern", choices=("iid", "rqmc"), default=None,
+                         help="inspection-only placement override; checkpoint/default stays IID")
+    inspect.add_argument("--light-sampling-strategy", choices=("surface", "solid_angle"), default=None,
+                         help="opt-in ellipsoid direct+SH sampler; exact affine solid-angle PDF")
+    inspect.add_argument("--direct-sample-reduction", choices=("mean", "trimmed80", "trimmed"), default=None,
+                         help="default: central90%% for learned indirect, mean for legacy explicit transport; overrides: mean/trimmed80/trimmed")
+    inspect.add_argument("--direct-sample-keep-percent", type=float, default=None,
+                         help="central fraction in percent (0,100]; selects trimmed reduction, default 90%% for learned indirect")
+    inspect.add_argument(
+        "--image-size",
+        type=int,
+        default=None,
+        help="override the checkpoint raster size for inspection only",
+    )
     inspect.add_argument(
         "--bounce-samples",
         type=int,
@@ -267,6 +344,21 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="cross-bilateral filter indirect HDR using rendered depth and normals",
     )
+    median_group = inspect.add_mutually_exclusive_group()
+    median_group.add_argument(
+        "--median-indirect",
+        dest="median_indirect",
+        action="store_true",
+        default=True,
+        help="apply the default edge-aware luminance-vector median to indirect HDR fireflies",
+    )
+    median_group.add_argument(
+        "--no-median-indirect",
+        dest="median_indirect",
+        action="store_false",
+        help="disable the default median filter and preserve raw Monte Carlo indirect HDR",
+    )
+    inspect.add_argument("--median-radius", type=int, default=1)
     inspect.add_argument("--denoiser-radius", type=int, default=2)
     inspect.add_argument("--denoiser-sigma-spatial", type=float, default=2.0)
     inspect.add_argument("--denoiser-sigma-depth", type=float, default=1.0)
@@ -305,7 +397,12 @@ def build_parser() -> argparse.ArgumentParser:
     camera_path.add_argument("--output-dir", type=Path, required=True)
     camera_path.add_argument("--device", default="cuda")
     camera_path.add_argument("--max-frames", type=int, default=None)
-    camera_path.add_argument("--render-samples", type=int, default=16)
+    camera_path.add_argument("--render-samples", type=int, default=None,
+                            help="inference default: 128 emitter samples")
+    camera_path.add_argument("--direct-sample-reduction", choices=("mean", "trimmed80", "trimmed"), default=None,
+                            help="default: central90%% for learned indirect, mean for legacy explicit transport")
+    camera_path.add_argument("--direct-sample-keep-percent", type=float, default=None,
+                            help="central fraction in percent (0,100]; selects trimmed reduction")
     camera_path.add_argument("--light-scale", type=float, default=1.0)
     camera_path.add_argument(
         "--symmetric-emission",
@@ -317,6 +414,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main() -> None:
     args = build_parser().parse_args()
+    if args.command == "adapt-lighting":
+        if not str(args.device).startswith("cuda") or not torch.cuda.is_available():
+            raise RuntimeError("lighting adaptation requires CUDA and diff-surfel-rasterization")
+        adapt_lighting(
+            args.base_checkpoint,
+            args.nerfstudio_dir,
+            args.output,
+            args.steps,
+            args.device,
+            checkpoint_every=args.checkpoint_every,
+            expected_emitters=args.expected_emitters,
+            emitter_lr=args.emitter_lr,
+            max_views=args.max_views,
+            initialize_only=args.initialize_only,
+        )
+        return
     if args.command == "train-gaussian-scene":
         if not str(args.device).startswith("cuda") or not torch.cuda.is_available():
             raise RuntimeError("shared Gaussian training requires CUDA and diff-surfel-rasterization")
@@ -336,10 +449,10 @@ def main() -> None:
         config.training.steps = args.steps
         config.raster.image_size = args.image_size
         config.training.geometry_lr = args.geometry_lr
-        config.training.optimize_scene_means = not args.freeze_scene_means
-        config.training.optimize_scene_scales = not args.freeze_scene_scales
-        config.training.optimize_scene_rotations = not args.freeze_scene_rotations
-        config.training.optimize_scene_opacities = not args.freeze_scene_opacities
+        config.training.optimize_scene_means = args.optimize_scene_means
+        config.training.optimize_scene_scales = args.optimize_scene_scales
+        config.training.optimize_scene_rotations = args.optimize_scene_rotations
+        config.training.optimize_scene_opacities = args.optimize_scene_opacities
         config.training.constrain_scene_scales = args.constrain_scene_scales
         config.training.scene_scale_min_ratio = args.scene_scale_min_ratio
         config.training.scene_scale_max_ratio = args.scene_scale_max_ratio
@@ -357,6 +470,7 @@ def main() -> None:
         config.training.associate_emitter_gaussians = not args.no_associate_emitter_gaussians
         config.training.emitter_gaussian_tangent_margin = args.emitter_gaussian_tangent_margin
         config.training.emitter_gaussian_normal_fraction = args.emitter_gaussian_normal_fraction
+        config.training.emitter_gaussian_off_albedo = args.emitter_gaussian_off_albedo
         config.training.optimize_emitter_centers = args.optimize_emitter_centers
         config.training.optimize_emitter_rotations = args.optimize_emitter_rotations
         config.training.optimize_emitter_scales = not args.freeze_emitter_scales
@@ -374,7 +488,17 @@ def main() -> None:
         config.adaptive.max_emitters = args.max_emitters
         config.adaptive.enabled = args.enable_emitter_adaptation
         config.render.num_brdf_samples = args.num_brdf_samples
-        config.render.num_light_samples = args.num_light_samples
+        config.render.lighting_mode = args.lighting_mode
+        config.render.indirect_irradiance_init = args.indirect_irradiance_init
+        config.training.indirect_lr = args.indirect_lr
+        config.training.indirect_start_step = args.indirect_start_step
+        config.training.indirect_final_lr = args.indirect_final_lr
+        config.losses.indirect_energy = args.indirect_energy
+        config.losses.indirect_directional = args.indirect_directional
+        config.render.num_light_samples = (
+            args.num_light_samples if args.num_light_samples is not None
+            else (32 if args.lighting_mode == DIRECT_SH_MODE else 128)
+        )
         config.render.num_bounce_samples = args.num_bounce_samples
         config.render.bounce_chunk_size = args.bounce_chunk_size
         config.training.rays_per_step = args.rays_per_step
@@ -395,6 +519,11 @@ def main() -> None:
             raise ValueError("--emitter-axis-lobe-sharpness must be positive")
         config.render.emitter_axis_lobe_sharpness = args.emitter_axis_lobe_sharpness
         config.render.indirect_bounce = not args.no_indirect
+        if config.render.lighting_mode == DIRECT_SH_MODE:
+            if args.no_indirect:
+                raise ValueError("--no-indirect conflicts with learned-indirect lighting")
+            config.render.num_brdf_samples = 0
+            config.render.indirect_bounce = False
         train_shared_gaussians(
             args.dnsplatter_checkpoint,
             args.nerfstudio_dir,
@@ -415,6 +544,10 @@ def main() -> None:
             args.device,
             max_views=args.max_views,
             render_samples=args.render_samples,
+            light_sample_pattern=args.light_sample_pattern,
+            light_sampling_strategy=args.light_sampling_strategy,
+            direct_sample_reduction=args.direct_sample_reduction,
+            direct_sample_keep_percent=args.direct_sample_keep_percent,
             bounce_samples=args.bounce_samples,
             split=args.split,
             evaluation_seed=args.evaluation_seed,
@@ -423,6 +556,8 @@ def main() -> None:
             training_sh_proxy=args.training_sh_proxy,
             symmetric_emission=args.symmetric_emission,
             denoise_indirect=args.denoise_indirect,
+            median_indirect=args.median_indirect,
+            median_radius=args.median_radius,
             denoiser_radius=args.denoiser_radius,
             denoiser_sigma_spatial=args.denoiser_sigma_spatial,
             denoiser_sigma_depth=args.denoiser_sigma_depth,
@@ -433,6 +568,7 @@ def main() -> None:
                 if args.active_emitter_indices is not None
                 else None
             ),
+            image_size=args.image_size,
         )
     elif args.command == "inspect-emitters":
         inspect_emitter_evolution(
@@ -454,6 +590,8 @@ def main() -> None:
             render_samples=args.render_samples,
             light_scale=args.light_scale,
             symmetric_emission=args.symmetric_emission,
+            direct_sample_reduction=args.direct_sample_reduction,
+            direct_sample_keep_percent=args.direct_sample_keep_percent,
         )
 
 

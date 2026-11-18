@@ -13,8 +13,9 @@ from .config import AEGIRConfig
 from .emitters import AreaEmitterModel
 from .gaussian_scene import GaussianMaterialBackend, planarize_gaussians
 from .math_utils import matrix_to_quat, quat_to_matrix
+from .indirect import DIRECT_SH_MODE, GlobalDiffuseSH, load_indirect_light
 
-CHECKPOINT_FORMAT = "aegir_shared_gaussian_v16"
+CHECKPOINT_FORMAT = "aegir_shared_gaussian_v17"
 SUPPORTED_CHECKPOINT_FORMATS = {
     "aegir_shared_gaussian_v1",
     "aegir_shared_gaussian_v2",
@@ -31,11 +32,13 @@ SUPPORTED_CHECKPOINT_FORMATS = {
     "aegir_shared_gaussian_v13",
     "aegir_shared_gaussian_v14",
     "aegir_shared_gaussian_v15",
+    "aegir_shared_gaussian_v16",
     CHECKPOINT_FORMAT,
 }
 EXACT_RESUME_FORMATS = {
     "aegir_shared_gaussian_v14",
     "aegir_shared_gaussian_v15",
+    "aegir_shared_gaussian_v16",
     CHECKPOINT_FORMAT,
 }
 
@@ -111,7 +114,7 @@ def require_exact_resume_state(payload: dict[str, Any], path: str | Path | None 
     if payload.get("format") not in EXACT_RESUME_FORMATS or "training_state" not in payload:
         raise ValueError(
             f"checkpoint{location} has no exact-resume optimizer/RNG state; "
-            "only v14-v16 directional-emitter checkpoints are exactly resumable; "
+            "only v14-v17 directional-emitter checkpoints are exactly resumable; "
             "v1-v13 are inference-only or explicit warm starts"
         )
     training_state = payload["training_state"]
@@ -127,6 +130,9 @@ def require_exact_resume_state(payload: dict[str, Any], path: str | Path | None 
     missing = sorted(required.difference(training_state))
     if missing:
         raise ValueError(f"checkpoint{location} is missing exact-resume fields: {missing}")
+    if payload.get("config", {}).get("render", {}).get("lighting_mode") == DIRECT_SH_MODE:
+        if payload.get("indirect_light_state") is None or training_state["optimizers"].get("indirect") is None:
+            raise ValueError(f"checkpoint{location} is missing learned-indirect model/optimizer state")
     if payload.get("format") in EXACT_RESUME_FORMATS:
         emitter_optimization = training_state.get("emitter_optimization")
         if emitter_optimization is None or "scale_anchors" not in emitter_optimization:
@@ -291,6 +297,7 @@ def save_checkpoint(
     dataset_meta: dict[str, Any],
     initial_emitter_state: dict[str, torch.Tensor] | None = None,
     training_state: dict[str, Any] | None = None,
+    indirect_light: GlobalDiffuseSH | None = None,
 ) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -306,6 +313,10 @@ def save_checkpoint(
         "losses": losses,
         "dataset": dataset_meta,
     }
+    if config.render.lighting_mode == DIRECT_SH_MODE:
+        if indirect_light is None:
+            raise ValueError("cannot save learned-indirect checkpoint without its SH model")
+        payload["indirect_light_state"] = module_state_dict_cpu(indirect_light)
     if initial_emitter_state is not None:
         payload["initial_emitter_state"] = {
             key: value.detach().cpu() for key, value in initial_emitter_state.items()
@@ -345,9 +356,12 @@ def load_checkpoint(
     emitters = emitters_from_state(
         payload["emitter_state"],
         device,
-        preserve_3d=payload.get("format") in {"aegir_shared_gaussian_v15", CHECKPOINT_FORMAT},
+        preserve_3d=payload.get("format") in {"aegir_shared_gaussian_v15", "aegir_shared_gaussian_v16", CHECKPOINT_FORMAT},
     )
     if payload.get("format") in EXACT_RESUME_FORMATS and "emitter_raw_state" in payload:
         raw_state = dict(payload["emitter_raw_state"])
         emitters.load_state_dict(raw_state, strict=True)
+    # Reject incomplete learned-light checkpoints instead of silently rendering
+    # with a fresh ambient initialization. The public return tuple stays stable.
+    load_indirect_light(payload, device)
     return scene, emitters, payload

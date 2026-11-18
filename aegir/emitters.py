@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor, nn
 
-from .math_utils import quat_to_matrix, safe_normalize, uniform_sample_sphere
+from .math_utils import balanced_rqmc_uv, quat_to_matrix, safe_normalize, uniform_sample_sphere
 
 
 @dataclass(slots=True)
@@ -359,23 +359,33 @@ class AreaEmitterModel(nn.Module):
         )
 
     def sample_surface_total(
-        self, points: Tensor, num_samples: int, generator=None
+        self, points: Tensor, num_samples: int, generator=None, *, pattern: str = "iid"
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         """Draw exactly ``num_samples`` from a balanced emitter mixture."""
 
         if num_samples <= 0:
             raise ValueError("num_samples must be positive")
+        if pattern not in ("iid", "rqmc"):
+            raise ValueError(f"unknown light sample pattern: {pattern}")
         flat = points.reshape(-1, 3)
         e = self.num_emitters
+        if e == 0:
+            raise ValueError("cannot sample an empty emitter mixture")
         offsets = torch.randint(e, (flat.shape[0], 1), device=flat.device, generator=generator)
         ids = (torch.arange(num_samples, device=flat.device)[None] + offsets) % e
+        uv = balanced_rqmc_uv(ids, e, flat.dtype, generator) if pattern == "rqmc" else None
         if self.representation == "ellipsoid_3d":
-            unit = uniform_sample_sphere(
-                (flat.shape[0], num_samples),
-                device=flat.device,
-                dtype=flat.dtype,
-                generator=generator,
-            )
+            if uv is None:
+                # Preserve the legacy IID RNG call order exactly.
+                unit = uniform_sample_sphere(
+                    (flat.shape[0], num_samples), device=flat.device,
+                    dtype=flat.dtype, generator=generator,
+                )
+            else:
+                z = uv[..., 0] * 2.0 - 1.0
+                phi = uv[..., 1] * 2.0 * torch.pi
+                radius = (1.0 - z.square()).clamp_min(0.0).sqrt()
+                unit = torch.stack((radius * phi.cos(), radius * phi.sin(), z), -1)
             local = unit * self.scales[ids]
             world_offsets = torch.einsum("bsj,bsij->bsi", local, self.rotations[ids])
             q = self.centers[ids] + world_offsets
@@ -389,9 +399,13 @@ class AreaEmitterModel(nn.Module):
                 dist.reshape(out_shape + (1,)),
                 ids.reshape(out_shape),
             )
-        disk = self._sample_unit_disk(
-            (flat.shape[0], num_samples), flat.device, flat.dtype, generator
-        )
+        if uv is None:
+            disk = self._sample_unit_disk(
+                (flat.shape[0], num_samples), flat.device, flat.dtype, generator
+            )
+        else:
+            radius, phi = uv[..., 0].sqrt(), uv[..., 1] * 2.0 * torch.pi
+            disk = torch.stack((radius * phi.cos(), radius * phi.sin()), -1)
         local = torch.cat(
             (disk * self.scales[ids], disk.new_zeros(disk.shape[:-1] + (1,))), dim=-1
         )
@@ -407,6 +421,85 @@ class AreaEmitterModel(nn.Module):
             dist.reshape(out_shape + (1,)),
             ids.reshape(out_shape),
         )
+
+    def sample_solid_angle_total(
+        self, points: Tensor, num_samples: int, generator=None, *, pattern: str = "iid"
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Sample the visible ellipsoid in affine solid-angle measure.
+
+        In unit-sphere coordinates, sample the subtended cone uniformly, then
+        map directions through A=R diag(scales). The exact world directional
+        Jacobian is det(A)/|A v|^3. Returned PDF includes emitter selection 1/E.
+        This is NOT uniform world solid angle for an anisotropic ellipsoid.
+
+        Outside: first analytic intersection, never the hidden back surface.
+        Inside: all unit-space directions and the exit intersection. On the
+        boundary: the inward hemisphere and zero-distance first intersection.
+        No distance clamp or contribution cap is part of the estimator.
+        Historical full-surface samples/surrogate PDF remain separate/unchanged.
+        """
+        if self.representation != "ellipsoid_3d":
+            raise ValueError("solid_angle currently requires ellipsoid_3d emitters")
+        if num_samples <= 0 or self.num_emitters == 0:
+            raise ValueError("solid_angle requires positive samples and nonempty emitters")
+        if pattern not in ("iid", "rqmc"):
+            raise ValueError(f"unknown light sample pattern: {pattern}")
+        flat = points.reshape(-1, 3)
+        e = self.num_emitters
+        offsets = torch.randint(e, (flat.shape[0], 1), device=flat.device, generator=generator)
+        ids = (torch.arange(num_samples, device=flat.device)[None] + offsets) % e
+        uv = (balanced_rqmc_uv(ids, e, flat.dtype, generator) if pattern == "rqmc" else
+              torch.rand((flat.shape[0], num_samples, 2), device=flat.device,
+                         dtype=flat.dtype, generator=generator))
+        scales, rotations = self.scales[ids], self.rotations[ids]
+        origin = torch.einsum("bsi,bsij->bsj", flat[:, None] - self.centers[ids], rotations) / scales
+        radius2 = origin.square().sum(-1, keepdim=True)
+        outside = radius2 >= 1.0
+        tiny = torch.finfo(flat.dtype).tiny
+        radius = radius2.clamp_min(tiny).sqrt()
+        axis = -origin / radius
+        fallback = torch.zeros_like(axis)
+        fallback[..., 2] = 1.0
+        axis = torch.where(radius2 > 0, axis, fallback)
+        seed = torch.zeros_like(axis)
+        seed[..., 2] = 1.0
+        alternate = torch.zeros_like(axis)
+        alternate[..., 0] = 1.0
+        seed = torch.where(axis[..., 2:3].abs() > .99, alternate, seed)
+        tangent = safe_normalize(torch.cross(seed, axis, dim=-1))
+        bitangent = torch.cross(axis, tangent, dim=-1)
+        sin2max = radius2.clamp_min(1.0).reciprocal()
+        cosmax = (1.0 - sin2max).clamp_min(tiny).sqrt()
+        # Rationalized subtraction avoids 1-cos(max) cancellation for tiny lights.
+        width = torch.where(outside, sin2max / (1.0 + cosmax), torch.full_like(radius, 2.0))
+        h = uv[..., :1] * width
+        costheta = 1.0 - h
+        sin2theta = h * (2.0 - h)
+        sintheta = sin2theta.clamp_min(tiny).sqrt()
+        phi = uv[..., 1:] * (2.0 * torch.pi)
+        radial = tangent * phi.cos() + bitangent * phi.sin()
+        unit_direction = axis * costheta + radial * sintheta
+        # Stable near-surface normal construction (avoids x+t*v cancellation
+        # when the ellipsoid is very small/far away).
+        root = (1.0 - sin2theta / sin2max).clamp_min(tiny).sqrt()
+        cosalpha = radius * sin2theta + costheta * root
+        sinalpha = sintheta * (radius * costheta - root)
+        near_unit = -axis * cosalpha + radial * sinalpha
+        b = (origin * unit_direction).sum(-1, keepdim=True)
+        gap = (1.0 - radius2).clamp_min(0.0)
+        inside_root = (b.square() + gap).clamp_min(tiny).sqrt()
+        exit_t = torch.where(b > 0, gap / (inside_root + b).clamp_min(tiny), inside_root - b)
+        exit_unit = origin + exit_t * unit_direction
+        unit_hit = torch.where(outside, near_unit, exit_unit)
+        q = self.centers[ids] + torch.einsum("bsj,bsij->bsi", unit_hit * scales, rotations)
+        mapped = torch.einsum("bsj,bsij->bsi", unit_direction * scales, rotations)
+        length = mapped.norm(dim=-1, keepdim=True)
+        dirs = mapped / length
+        dist = (q - flat[:, None]).norm(dim=-1, keepdim=True)
+        pdf = length.pow(3) / (scales.prod(-1, keepdim=True) * (2.0 * torch.pi * width) * e)
+        shape = points.shape[:-1] + (num_samples,)
+        return (q.reshape(shape + (3,)), dirs.reshape(shape + (3,)),
+                dist.reshape(shape + (1,)), ids.reshape(shape), pdf.reshape(shape + (1,)))
 
     def effective_area(self) -> Tensor:
         if self.representation == "ellipsoid_3d":

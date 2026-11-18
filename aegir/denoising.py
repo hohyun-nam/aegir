@@ -118,3 +118,98 @@ def cross_bilateral_denoise(
     filtered = numerator / denominator.clamp_min(torch.finfo(work_dtype).eps)[..., None]
     result = torch.where(valid[..., None], filtered, work_color)
     return result.to(color.dtype)
+
+
+def edge_aware_vector_median_denoise(
+    color: Tensor,
+    depth: Tensor,
+    normals: Tensor,
+    valid_mask: Tensor | None = None,
+    *,
+    radius: int = 1,
+    depth_multiplier: float = 3.0,
+    normal_cosine: float = 0.8,
+    depth_epsilon: float = 1.0e-3,
+) -> Tensor:
+    """Reject HDR fireflies with an edge-aware luminance vector median.
+
+    The selected output is an existing RGB vector whose luminance is the median
+    of compatible neighbors. This avoids the false colors produced by taking an
+    independent median in each channel. Depth gradients and normals prevent
+    samples from crossing surface discontinuities.
+    """
+    if color.ndim != 3:
+        raise ValueError("color must have shape [H, W, C]")
+    height, width, channels = color.shape
+    if channels != 3 or normals.shape != (height, width, 3):
+        raise ValueError("color and normals must have shape [H, W, 3]")
+    depth_2d = _single_channel(depth, "depth", height, width)
+    if valid_mask is None:
+        requested_valid = torch.ones((height, width), dtype=torch.bool, device=color.device)
+    else:
+        requested_valid = _single_channel(valid_mask, "valid_mask", height, width).bool()
+    if depth.device != color.device or normals.device != color.device or requested_valid.device != color.device:
+        raise ValueError("color, depth, normals, and valid_mask must be on the same device")
+    if radius < 0 or depth_multiplier <= 0.0 or not 0.0 <= normal_cosine <= 1.0 or depth_epsilon <= 0.0:
+        raise ValueError("invalid median denoiser parameters")
+    if radius == 0 or height == 0 or width == 0:
+        return color.clone()
+
+    work_dtype = torch.float32 if color.dtype in (torch.float16, torch.bfloat16) else color.dtype
+    work_color = torch.nan_to_num(color.to(work_dtype))
+    work_depth = depth_2d.to(work_dtype)
+    work_normals = F.normalize(torch.nan_to_num(normals.to(work_dtype)), dim=-1, eps=1.0e-8)
+    valid = (
+        requested_valid
+        & torch.isfinite(work_depth)
+        & (work_depth > 0.0)
+        & torch.isfinite(color).all(dim=-1)
+        & torch.isfinite(normals).all(dim=-1)
+    )
+    safe_depth = torch.where(valid, work_depth, torch.zeros_like(work_depth))
+
+    depth_chw = safe_depth[None, None]
+    valid_chw = valid[None, None]
+    padded_depth_1 = F.pad(depth_chw, (1, 1, 1, 1), mode="replicate")
+    padded_valid_1 = F.pad(valid_chw.float(), (1, 1, 1, 1), mode="replicate").bool()
+    center = safe_depth
+    neighbors = (
+        (padded_depth_1[0, 0, 1 : height + 1, :width], padded_valid_1[0, 0, 1 : height + 1, :width]),
+        (padded_depth_1[0, 0, 1 : height + 1, 2 : width + 2], padded_valid_1[0, 0, 1 : height + 1, 2 : width + 2]),
+        (padded_depth_1[0, 0, :height, 1 : width + 1], padded_valid_1[0, 0, :height, 1 : width + 1]),
+        (padded_depth_1[0, 0, 2 : height + 2, 1 : width + 1], padded_valid_1[0, 0, 2 : height + 2, 1 : width + 1]),
+    )
+    left, right, up, down = [torch.where(ok, value, center) for value, ok in neighbors]
+    grad_x = 0.5 * (right - left)
+    grad_y = 0.5 * (down - up)
+
+    pad = (radius, radius, radius, radius)
+    padded_color = F.pad(work_color.permute(2, 0, 1)[None], pad, mode="replicate")
+    padded_depth = F.pad(depth_chw, pad, mode="replicate")
+    padded_normals = F.pad(work_normals.permute(2, 0, 1)[None], pad, mode="replicate")
+    padded_valid = F.pad(valid_chw.float(), pad, mode="constant", value=0.0)
+    colors = []
+    eligible = []
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            neighbor_color = _shifted(padded_color, dy, dx, radius, height, width)[0].permute(1, 2, 0)
+            neighbor_depth = _shifted(padded_depth, dy, dx, radius, height, width)[0, 0]
+            neighbor_normal = _shifted(padded_normals, dy, dx, radius, height, width)[0].permute(1, 2, 0)
+            neighbor_valid = _shifted(padded_valid, dy, dx, radius, height, width)[0, 0].bool()
+            depth_scale = grad_x.abs() * abs(dx) + grad_y.abs() * abs(dy) + depth_epsilon
+            depth_ok = (safe_depth - neighbor_depth).abs() <= depth_multiplier * depth_scale
+            normal_ok = (work_normals * neighbor_normal).sum(dim=-1) >= normal_cosine
+            colors.append(neighbor_color)
+            eligible.append(valid & neighbor_valid & depth_ok & normal_ok)
+
+    color_stack = torch.stack(colors)
+    eligible_stack = torch.stack(eligible)
+    luminance_weights = work_color.new_tensor((0.2126, 0.7152, 0.0722))
+    luminance = (color_stack * luminance_weights).sum(dim=-1)
+    order = luminance.masked_fill(~eligible_stack, torch.inf).argsort(dim=0)
+    count = eligible_stack.sum(dim=0).clamp_min(1)
+    rank = ((count - 1) // 2).unsqueeze(0)
+    selected = order.gather(0, rank).squeeze(0)
+    gather_index = selected[None, ..., None].expand(1, height, width, channels)
+    filtered = color_stack.gather(0, gather_index).squeeze(0)
+    return torch.where(valid[..., None], filtered, work_color).to(color.dtype)
