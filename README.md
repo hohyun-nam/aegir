@@ -31,10 +31,12 @@ The lighting fit uses 24 posed RGB views. Both rows of the table average over th
 
 Use Linux with an NVIDIA CUDA GPU. Install the Python package and the bundled
 rasterizer and OptiX tracer in the active training environment. See the
-[extension setup](external/README.md). The full geometry stage also requires the
-patched native 2DGS trainer from the workspace backup at
-`../external/dn-splatter-2dgs` (or set `TWO_DGS_ROOT`). Set `DNS_ENV` to the
-training environment prefix when it differs from the server default.
+[extension setup](external/README.md). Geometry preparation uses Open3D, the
+Nerfstudio COLMAP parser, and OpenCV. Use the versions in your 2DGS training
+environment. The full geometry stage also requires the patched native 2DGS
+trainer from the workspace backup at `../external/dn-splatter-2dgs` (or set
+`TWO_DGS_ROOT`). Set `DNS_ENV` to the training environment prefix when it differs
+from the server default. Use Bash 4 or later for the launcher.
 
 The launcher expects the prepared Blender/Conference scene layout used in the
 experiments. It consumes posed RGB and a fixed-pose COLMAP model, an unaligned
