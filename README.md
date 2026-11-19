@@ -31,6 +31,10 @@ The lighting fit uses 24 posed RGB views. Both rows of the table average over th
 
 ## Conference reconstruction (FIPT-Real)
 
+![Target RGB, reconstructed RGB, estimated albedo, and estimated surface normals for the same FIPT-Real Conference view.](assets/conference-reconstruction.png)
+
+The figure shows training view 0000 rendered with 128 direct-light samples per pixel.
+
 We ran the same LDR reconstruction pipeline on the real Conference scene. We trained the 2D Gaussian geometry for 30,000 steps, then optimized materials and lighting for 5,000 steps with geometry fixed. The results average over 30 training views rendered at 256 × 256.
 
 | Direct-light samples per pixel | PSNR (dB) ↑ | SSIM ↑ | LPIPS ↓ |
