@@ -8,6 +8,8 @@ The main Blender run trained 2D Gaussian Splatting for 30,000 steps, then optimi
 
 ## Map construction pipeline
 
+![Pipeline overview showing LDR Gaussian map construction, lighting adaptation with fixed geometry and materials, and evaluation on held-out views.](assets/blender/relightable-gaussian-pipeline.png)
+
 1. **Reconstruct geometry.** Triangulate RGB features with supplied camera poses and intrinsics. Train a native 2D Gaussian scene using photometric supervision and RGB-derived ZoeDepth estimates for relative depth guidance.
 2. **Initialize area emitters.** Project SAM 3 fixture masks onto the learned Gaussian surface. Retain evidence supported across multiple views, group the projected points with DBSCAN, and use PCA to fit 3D ellipsoid supports. Tag the Gaussians that contribute to each fixture across views.
 3. **Fit materials and illumination.** Hold geometry and emitter supports fixed while optimizing surface materials, directional emitter radiance, scene exposure, and global diffuse irradiance. Direct lighting uses emitter sampling and OptiX shadow visibility. Indirect diffuse lighting uses learned degree-2 RGB spherical harmonics.
