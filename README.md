@@ -29,6 +29,17 @@ In a separate experiment on the same Blender scene, six original fixtures were s
 
 The lighting fit uses 24 posed RGB views. Both rows of the table average over the same eight held-out validation views at 256 × 256, with matched random seeds, 32 direct-light samples per pixel, fixed exposure, and the same valid-pixel masks. These results measure RGB reconstruction under the changed lighting in this synthetic scene.
 
+## Conference reconstruction (FIPT-Real)
+
+We ran the same LDR reconstruction pipeline on the real Conference scene. We trained the 2D Gaussian geometry for 30,000 steps, then optimized materials and lighting for 5,000 steps with geometry fixed. The results average over 30 training views rendered at 256 × 256.
+
+| Direct-light samples per pixel | PSNR (dB) ↑ | SSIM ↑ | LPIPS ↓ |
+| --- | ---: | ---: | ---: |
+| 128 | 26.30 | 0.838 | 0.277 |
+| 512 | 26.31 | 0.857 | 0.225 |
+
+Both rows render the same checkpoint. See the [reconstruction protocol](docs/GT_FREE_CENTRAL90_RESTART_20261010.md) for the setup.
+
 ## Run the pipeline
 
 Use Linux with an NVIDIA CUDA GPU. Install the Python package and the bundled
