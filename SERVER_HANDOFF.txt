@@ -3,7 +3,8 @@ AEGIR 현재 서버 handoff (authoritative)
 
 이 파일만 현재 실행 경로 안내로 사용한다. 2026-08-11 이전의 /home/tako,
 /home/megapose, /home/hohyun 및 AEGIR_old 명령은 현재 환경에서 실행하지 않는다.
-옛 문서는 docs/archive/SERVER_HANDOFF_legacy_2026-08-11.txt에 보관했다.
+이전 서버 안내는 Git 이력에 보관되어 있다.
+https://github.com/hohyun-nam/aegir/blob/61cbf90860df8e7f023e519d090eefe2435dc1c0/docs/archive/SERVER_HANDOFF_legacy_2026-08-11.txt
 
 현재 경로
 
