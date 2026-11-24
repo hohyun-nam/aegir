@@ -1,37 +1,25 @@
-# Blender and Conference experiment results
+# Reconstruction results
 
-[Download the per-view metrics](per-view-metrics.csv). The CSV contains 120 reconstruction evaluations and 88 Blender lighting-adaptation evaluations. LPIPS uses the AlexNet backbone.
+Selected original render comparisons from the LDR Blender and FIPT-Real Conference experiments. Each PNG shows the **target RGB on the left** and the **reconstructed RGB on the right** (256 × 256 per image). The ten training views per scene are sampled evenly from the 30 evaluated views of the 30K geometry / 5K inverse-rendering runs, at 128 direct-light samples per pixel.
 
-## Reconstruction under the original lighting
+[Training settings, reconstruction metrics and lighting-adaptation results](../README.md)
 
-The Blender room and the FIPT-Real Conference scene each used 30,000 geometry optimization steps and 5,000 material and lighting fitting steps. Each row averages 30 training views at 256 × 256. Within a scene, the two sample budgets render the same checkpoint and camera set. The direct-light estimator retains the central 90% of the samples by luminance.
+## FIPT-Real Conference
 
-| Scene | Direct-light samples per pixel | PSNR (dB) ↑ | SSIM ↑ | LPIPS ↓ |
-| --- | ---: | ---: | ---: | ---: |
-| Blender | 128 | 24.63 | 0.764 | 0.248 |
-| Blender | 512 | 24.65 | 0.776 | 0.232 |
-| FIPT-Real Conference | 128 | 26.30 | 0.838 | 0.277 |
-| FIPT-Real Conference | 512 | 26.31 | 0.857 | 0.225 |
+| View | View |
+| --- | --- |
+| ![Conference view 0000](conference-frame-0000.png)<br>Frame 0000 | ![Conference view 0014](conference-frame-0014.png)<br>Frame 0014 |
+| ![Conference view 0029](conference-frame-0029.png)<br>Frame 0029 | ![Conference view 0048](conference-frame-0048.png)<br>Frame 0048 |
+| ![Conference view 0063](conference-frame-0063.png)<br>Frame 0063 | ![Conference view 0077](conference-frame-0077.png)<br>Frame 0077 |
+| ![Conference view 0092](conference-frame-0092.png)<br>Frame 0092 | ![Conference view 0112](conference-frame-0112.png)<br>Frame 0112 |
+| ![Conference view 0126](conference-frame-0126.png)<br>Frame 0126 | ![Conference view 0141](conference-frame-0141.png)<br>Frame 0141 |
 
-### Blender room
+## Blender room
 
-![Blender target RGB, reconstructed RGB, albedo, and normals](../assets/blender/blender-gaussian-map.png)
-
-### FIPT-Real Conference
-
-![Conference target RGB, reconstructed RGB, albedo, and normals](../assets/conference-reconstruction.png)
-
-[Reconstruction protocol](../docs/GT_FREE_CENTRAL90_RESTART_20261010.md)
-
-## Blender Corner4 lighting adaptation
-
-Six original fixtures were turned off and four corner fixtures were turned on. The adaptation fitted lighting from 24 training views while keeping the base geometry and materials fixed. Both rows average the same eight validation frames (24–31) at 256 × 256 with 32 direct-light samples per pixel and matched seeds.
-
-| Lighting fit | PSNR (dB) ↑ | SSIM ↑ | LPIPS ↓ |
-| --- | ---: | ---: | ---: |
-| After emitter initialization (0 steps) | 17.62 | 0.438 | 0.567 |
-| After lighting adaptation (10,000 steps) | 24.87 | 0.716 | 0.337 |
-
-![Two Blender validation views under the changed lighting](../assets/blender/blender-corner4.png)
-
-[Lighting adaptation protocol](../docs/CORNER4_DIRECT_SH_ADAPTATION_20261007.md)
+| View | View |
+| --- | --- |
+| ![Blender view 0000](blender-frame-0000.png)<br>Frame 0000 | ![Blender view 0009](blender-frame-0009.png)<br>Frame 0009 |
+| ![Blender view 0018](blender-frame-0018.png)<br>Frame 0018 | ![Blender view 0030](blender-frame-0030.png)<br>Frame 0030 |
+| ![Blender view 0039](blender-frame-0039.png)<br>Frame 0039 | ![Blender view 0048](blender-frame-0048.png)<br>Frame 0048 |
+| ![Blender view 0057](blender-frame-0057.png)<br>Frame 0057 | ![Blender view 0070](blender-frame-0070.png)<br>Frame 0070 |
+| ![Blender view 0079](blender-frame-0079.png)<br>Frame 0079 | ![Blender view 0088](blender-frame-0088.png)<br>Frame 0088 |
