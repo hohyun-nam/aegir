@@ -16,4 +16,4 @@ mkdir -p \
   "$WORKSPACE/external_runs/dn_splatter"
 
 printf 'Prepared AEGIR server workspace under %s\n' "$WORKSPACE"
-printf 'Next: read %s/AEGIR/SERVER_HANDOFF.txt\n' "$WORKSPACE"
+printf 'Next: read %s/AEGIR/README.md for setup and run instructions\n' "$WORKSPACE"

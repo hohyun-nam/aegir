@@ -21,7 +21,7 @@ same commit.
   `1e-4`; steps 15K-20K update emitters only.
 - Use the frozen DN full-SH proxy for training-time indirect transport, with
   explicit secondary-bounce transport used for final rendering in the paper
-  baseline. See `docs/PIPELINE_PAPER_AUDIT_2026-09-06.md` for the paper/code
+  baseline. See the [historical paper/code audit](https://github.com/hohyun-nam/aegir/blob/61cbf90860df8e7f023e519d090eefe2435dc1c0/docs/PIPELINE_PAPER_AUDIT_2026-09-06.md) for the paper/code
   audit and exact caveats.
 
 To recover the historical adaptive parameter policy with the current CLI, use:
@@ -155,7 +155,7 @@ Conference `outputs/conference_practical3d_hdrmv_20260915/aegir/aegir_20k.pt`다
 
 관련 문서: [실전 풀코스](PRACTICAL_TRAINING_PIPELINE.md),
 [HDR 다중 뷰 초기화](HDR_MULTIVIEW_EMITTER_INITIALIZATION.md),
-[논문 대조/남은 한계](PIPELINE_PAPER_AUDIT_2026-09-06.md).
+[논문 대조/남은 한계](https://github.com/hohyun-nam/aegir/blob/61cbf90860df8e7f023e519d090eefe2435dc1c0/docs/PIPELINE_PAPER_AUDIT_2026-09-06.md).
 
 ## 과거 기본 설정 — 2026-09-14 당시 기록
 
@@ -228,7 +228,7 @@ The Conference wrapper exposes these settings as `ALBEDO_LR`,
   training-view evaluation, and uncompensated initial angular attenuation.
 - This entry documents findings only; initialization and runner behavior have
   not yet been corrected. See
-  `PIPELINE_INPUT_PROVENANCE_AUDIT_2026-09-15.md` for evidence and the repair path.
+  [the historical input audit](https://github.com/hohyun-nam/aegir/blob/61cbf90860df8e7f023e519d090eefe2435dc1c0/docs/PIPELINE_INPUT_PROVENANCE_AUDIT_2026-09-15.md) for evidence and the repair path.
 
 ### 2026-09-15 — Conference metric-depth seed and exact emitter exclusion
 
@@ -693,7 +693,7 @@ Blender practical run `blender_practical3d_20260915_051804`는 native2DGS20K/exp
 
 출처: 초기 baseline `10127b2`, 통합 transport commit `b4392c0`,
 [초기 코드 검토](https://github.com/hohyun-nam/aegir/blob/61cbf90860df8e7f023e519d090eefe2435dc1c0/AEGIR_PAPER_CODE_REVIEW_2026-08-12.md),
-[IRGS glue 감사](IRGS_GLUE_AUDIT_2026-08-14.md).
+[IRGS glue 감사](https://github.com/hohyun-nam/aegir/blob/61cbf90860df8e7f023e519d090eefe2435dc1c0/docs/IRGS_GLUE_AUDIT_2026-08-14.md).
 원문에는 수정 전 설명과 수정 후 상태가 함께 있으므로 완료 표시와 현재 코드를 구분한다.
 
 1. **회전된 anisotropic emitter의 좌표축 오류**: row-vector의 world-to-local
@@ -743,7 +743,7 @@ Blender practical run `blender_practical3d_20260915_051804`는 native2DGS20K/exp
 
 ### B. 9월 6일 transport 수정 묶음 — 별도 감사 문서에만 상세 기록되던 부분
 
-출처: `b4392c0`, [논문 대조](PIPELINE_PAPER_AUDIT_2026-09-06.md).
+출처: `b4392c0`, [논문 대조](https://github.com/hohyun-nam/aegir/blob/61cbf90860df8e7f023e519d090eefe2435dc1c0/docs/PIPELINE_PAPER_AUDIT_2026-09-06.md).
 
 - **에미터 뒤 Gaussian이 shadow에 섞임**: surface–light endpoint를 OptiX
   forward/backward에 전달하여 유한 ray segment 밖 hit를 alpha/depth/material/SH에서 제외했다.
@@ -858,11 +858,11 @@ Blender practical run `blender_practical3d_20260915_051804`는 native2DGS20K/exp
   center/rotation, densification/pruning은 고정한다. geometry LR은 `1e-6`이고 배경
   scale은 native 2DGS 초기값의 `0.9–1.1배`로 clamp한다. 이 초기 scale anchor는
   exact-resume state에도 저장한다.
-- `scripts/run_conference_scale_only_geometry_ablation.sh`는 최신 practical Conference
+- [당시 scale-only 실험 스크립트](https://github.com/hohyun-nam/aegir/blob/61cbf90860df8e7f023e519d090eefe2435dc1c0/scripts/run_conference_scale_only_geometry_ablation.sh)는 당시 practical Conference
   geometry/data에서 geometry-fixed와 scale-only를 각각 secondary-only 128/1로 새로
   학습하고 128/8 30-view inspect를 수행한다. 두 결과의
   frame/seed/target/mask와 emitter 개수가 같은지 검사하고
-  `scripts/compose_geometry_scale_comparison.py`로 GT/fixed/scale-only/difference 비교
+  [당시 비교 이미지 스크립트](https://github.com/hohyun-nam/aegir/blob/61cbf90860df8e7f023e519d090eefe2435dc1c0/scripts/compose_geometry_scale_comparison.py)로 GT/fixed/scale-only/difference 비교
   이미지, contact sheet, GIF, metrics JSON을 생성한다.
 - 이 실험은 Gaussian 수를 바꾸지 않는다. 따라서 결과 차이는 densification이나
   opacity pruning이 아니라 배경 tangent scale 최적화에서 발생한다.
