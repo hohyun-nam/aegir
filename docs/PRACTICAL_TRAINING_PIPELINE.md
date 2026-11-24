@@ -104,11 +104,11 @@ analytic emitter 초기화는 각각 `emitter_initialization/2dgs_emitter_inclus
 `emitter_initialization/map_with_initial_emitters.ply`로 확인한다.
 
 Blender에서 같은 조건을 새 predicted-depth seed와 native 2DGS부터 실행하는 entrypoint는
-`scripts/run_blender_inclusive2dgs_mean_only_20k_full_pipeline.sh`다. Conference 완료 뒤
-자동 분석하고 Blender를 순서대로 시작하려면
-`scripts/watch_conference_then_run_blender_mean_only_20k.sh`를 별도 tmux에서 실행한다.
+`scripts/run_blender_inclusive2dgs_mean_only_20k_full_pipeline.sh`다. 과거에는 Conference 완료 뒤
+자동 분석하고 Blender를 순서대로 시작하는
+[서버 전용 감시 스크립트](https://github.com/hohyun-nam/aegir/blob/61cbf90860df8e7f023e519d090eefe2435dc1c0/scripts/watch_conference_then_run_blender_mean_only_20k.sh)를 사용했다.
 감시기는 Conference의 최종 checkpoint, progression summary, 완료 marker를 모두 확인한
-경우에만 Blender를 시작한다. `scripts/analyze_mean_only_progression.py`는 각 checkpoint의
+경우에만 Blender를 시작했다. `scripts/analyze_mean_only_progression.py`는 각 checkpoint의
 PSNR/SSIM/LPIPS와 초기 2DGS 대비 background mean 이동량의 mean/median/p90/p95/p99/max,
 고정해야 하는 scale/rotation/opacity의 최대 변화량을 JSON으로 기록한다.
 
