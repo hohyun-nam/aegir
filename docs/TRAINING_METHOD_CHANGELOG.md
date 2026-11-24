@@ -692,7 +692,7 @@ Blender practical run `blender_practical3d_20260915_051804`는 native2DGS20K/exp
 ### A. 8월 초기 구현에서 수정했지만 이 문서에 모이지 않았던 항목
 
 출처: 초기 baseline `10127b2`, 통합 transport commit `b4392c0`,
-[초기 코드 검토](../AEGIR_PAPER_CODE_REVIEW_2026-08-12.md),
+[초기 코드 검토](https://github.com/hohyun-nam/aegir/blob/61cbf90860df8e7f023e519d090eefe2435dc1c0/AEGIR_PAPER_CODE_REVIEW_2026-08-12.md),
 [IRGS glue 감사](IRGS_GLUE_AUDIT_2026-08-14.md).
 원문에는 수정 전 설명과 수정 후 상태가 함께 있으므로 완료 표시와 현재 코드를 구분한다.
 
